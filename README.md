@@ -159,6 +159,18 @@ first, then supplier bills **you** must pay, then customer debts.
   (paid/overdue/partial invoices, purchase bills, stock goods, an offer) so
   you can safely test everything. Your real documents are untouched.
 
+## 🌐 Language — English by default, Latvian and more
+
+Settings has a **Language / Valoda** selector (default: English). Choosing
+**Latviešu** switches the whole program instantly — menus, dashboard, forms,
+tables, buttons, statuses and **printed PDFs** (RĒĶINS, Izdevējs, Saņēmējs,
+Summa bez PVN, Kopā ar PVN…). The choice is remembered per browser.
+
+Adding another language (LT, EE, DE…) = open `public/i18n.js` and add a new
+dictionary block `lt: { "English phrase": "vertimas", … }` plus one line in
+`LANGS` — the selector picks it up automatically. Translations only touch
+interface text, never your data.
+
 ## Customer & supplier base
 
 The **👥 Customers & suppliers** page stores your contacts: company or private
@@ -167,6 +179,40 @@ person, registration no., VAT (PVN) no., email, phone, address. Search works by
 invoice, start typing in the customer field and matching contacts appear in a
 dropdown — click one and it's filled and linked to the document. Deleting a contact
 never breaks old documents (they keep the saved name).
+
+**Import from Excel / CSV** — on the same page, upload an `.xlsx`, `.xls` or
+`.csv` file with your customers or suppliers. Recognised columns (any order,
+English or Latvian): Name / Nosaukums, Email, Phone / Telefons, Registration no. /
+Reģ. nr., VAT no. / PVN nr., Address / Adrese, Kind / Veids (customer or
+supplier). Rows with the same name or VAT number as an existing contact are
+skipped automatically (max 500 rows per file). **Export CSV** downloads your
+whole contact base as a CSV file you can edit in Excel and re-import.
+
+## 💾 Backups
+
+Settings has a **Backups** card. Set a **folder path on the server** (e.g.
+`/home/janis/reda-backups`), tick "save automatically every day", and Reda
+writes a full copy of the database there once a day while running (it checks
+after start and then every 6 hours; if a copy from today already exists, it
+skips). **Back up now** makes a copy immediately. Copies are named
+`reda-backup-YYYY-MM-DD-HH-MM-SS-mmm.db`, and the 30 newest are kept — older
+ones are deleted automatically.
+
+**Download backup file** sends a fresh copy straight to your browser — a good
+way to keep an off-site copy (e.g. save it to Google Drive).
+
+Restoring: stop the server, replace `data.db` with the backup copy (rename it
+to `data.db`), start the server again. Because backups are made safely (SQL
+`VACUUM INTO`), a copy is always a consistent, valid database — even if made
+while someone was working.
+
+## 📎 Scanned originals (PDF / photos)
+
+Every time you scan a document and save it, Reda also stores the **original
+file** (PDF or photo) — click **📎 Scanned originals** in the left menu. Each
+row shows the file, its type, the document number it became, and the date.
+Click the file name to open the original in a new tab, or delete it. Files live
+inside the database, so a single backup covers them too.
 
 ## Company details & logo on printouts
 

@@ -269,6 +269,7 @@ async function route() {
   if (me) {
     if (hash === '#/login' || hash === '#/register') return location.hash = '#/dashboard';
     if (hash === '#/settings') return viewSettings(me);
+    if (hash === '#/scans') return viewScans(me);
     if (hash === '#/contacts') return viewContacts(me);
     return viewDashboard(me);
   }
@@ -399,6 +400,7 @@ function appShell(me, active, content) {
         <a href="#/dashboard" class="${active === 'dashboard' ? 'active' : ''}">📊 Invoices</a>
         <a href="#/contacts" class="${active === 'contacts' ? 'active' : ''}">👥 Customers & suppliers</a>
         <a href="#/settings" class="${active === 'settings' ? 'active' : ''}">⚙️ Settings</a>
+        <a href="#/scans" class="${active === 'scans' ? 'active' : ''}">📎 Scanned originals</a>
       </nav>
       <div class="spacer"></div>
       <div class="userbox"><b>${esc(me.name)}</b>${esc(me.role)}<br>${esc(me.email)}</div>
@@ -505,7 +507,7 @@ async function printDoc(me, d) {
 </body></html>`;
   const f = document.createElement('iframe');
   f.style.display = 'none';
-  f.srcdoc = html;
+  f.srcdoc = REDA_I18N.translateHtml(html);
   f.onload = () => { f.contentWindow.focus(); f.contentWindow.print(); setTimeout(() => f.remove(), 60000); };
   document.body.appendChild(f);
 }
@@ -671,7 +673,7 @@ function viewDashboard(me) {
       });
     document.getElementById('unpaidBox').innerHTML = unpaid.length ? unpaid.slice(0, 8).map((d) => `
       <div class="unpaid-row ${dueStateU(d)}">
-        <span class="cust-name">${d.doc_type === 'bill' ? '🏭 <b>YOU PAY:</b> ' : ''}${esc(d.customer)}</span>
+        <span class="cust-name">${d.doc_type === 'bill' ? '🏭 <b>Preču piegādātājs:</b> ' : ''}${esc(d.customer)}</span>
         <span style="white-space:nowrap">${fmt(d.amount_cents - d.paid_cents, d.currency)}<div style="color:var(--muted);font-size:.75rem">due ${esc(d.due_date || '—')}${dueStateU(d) === 'overdue' ? ' 🔴 overdue' : dueStateU(d) === 'due-today' ? ' 🟡 today' : ''}</div></span>
       </div>`).join('') + (unpaid.length > 8 ? `<p class="sub">…and ${unpaid.length - 8} more</p>` : '')
       : '<p class="empty">Nothing unpaid. ✔</p>';
@@ -946,7 +948,7 @@ function viewDashboard(me) {
     try {
       const { text, kind, preview } = await fileToInvoiceText(file, (s) => status.textContent = s);
       const parsed = parseInvoiceText(text);
-      lastScan = { parsed, kind, preview };
+      lastScan = { parsed, kind, preview, file }; // keep the original — it will be stored with the document
       // show the original document next to the form so you can check it
       const found = ['customer', 'amount', 'due_date', 'invoiceNo'].filter((k) => parsed[k]).length;
       // red warning box when something could not be read — the user must check that place manually
@@ -1055,7 +1057,7 @@ function viewDashboard(me) {
       if (real.length && !real.every((it) => it.name && Number(String(it.qty).replace(',', '.')) > 0)) {
         return showError('Every line needs a product name and a quantity bigger than 0.');
       }
-      await api('/api/invoices', 'POST', {
+      const created = await api('/api/invoices', 'POST', {
         customer: custInput.value,
         currency: document.getElementById('currency').value,
         due_date: document.getElementById('due_date').value,
@@ -1067,6 +1069,20 @@ function viewDashboard(me) {
         contact_id: document.getElementById('contact_id').value || null,
         bank_id: document.getElementById('bankSel').value || null,
       });
+      // if this document came from a scan, store the ORIGINAL file (PDF/photo) with it
+      if (lastScan && lastScan.file) {
+        try {
+          const fr = new FileReader();
+          const dataUrl = await new Promise((resolve, reject) => {
+            fr.onload = () => resolve(fr.result); fr.onerror = reject; fr.readAsDataURL(lastScan.file);
+          });
+          const up = await api('/api/scans', 'POST', { filename: lastScan.file.name, data: dataUrl });
+          if (created && created.number) {
+            await api('/api/scans', 'PATCH', { id: up.id, doc_number: created.number });
+          }
+        } catch (err) { /* scan storage is best-effort: never block the saved document */ }
+        lastScan = null;
+      }
       e.target.reset();
       document.getElementById('contact_id').value = '';
       document.getElementById('issue_date').value = new Date().toISOString().slice(0, 10);
@@ -1083,6 +1099,35 @@ function viewDashboard(me) {
     sel.innerHTML = '<option value="">— default (first) —</option>' + co.banks
       .map((b, i) => `<option value="${i + 1}">${esc(`${b.name || 'Bank'} · ${b.iban || ''}`)}</option>`).join('');
   }).catch(() => {});
+  load().catch((e) => showError(e.message));
+}
+
+function viewScans(me) {
+  appShell(me, 'scans', `
+    <div class="topline"><h1>📎 Scanned originals (PDF / photos)</h1><span class="company-chip">🏢 ${esc(me.company)}</span></div>
+    <div class="card">
+      <p class="sub">Every time you scan a document on the dashboard and save it, the original PDF or photo is stored here automatically — so you always have the source paper. Click a file to open it.</p>
+      <div id="scanFiles"><p class="empty">Loading…</p></div>
+    </div>`);
+  const load = async () => {
+    const { scans } = await api('/api/scans');
+    document.getElementById('scanFiles').innerHTML = scans.length ? `
+      <table><thead><tr><th>File</th><th>Type</th><th>Linked document</th><th>Added</th><th></th></tr></thead>
+      <tbody>${scans.map((s) => `
+        <tr>
+          <td><a href="/api/scans/${s.id}" target="_blank" rel="noopener">📄 ${esc(s.filename)}</a></td>
+          <td>${esc(s.mime)}</td>
+          <td>${s.doc_number ? `<b>${esc(s.doc_number)}</b>` : '<span class="sub">(not linked yet)</span>'}</td>
+          <td>${esc(s.created_at)}</td>
+          <td class="actions"><button data-id="${s.id}" class="sdel danger">Delete</button></td>
+        </tr>`).join('')}</tbody></table>`
+      : '<p class="empty">No scanned originals yet — scan a document on the dashboard and save it, the original appears here.</p>';
+    document.querySelectorAll('.sdel').forEach((b) => b.onclick = async () => {
+      if (!confirm('Delete this scanned original?')) return;
+      await api('/api/scans?id=' + b.dataset.id, 'DELETE');
+      load();
+    });
+  };
   load().catch((e) => showError(e.message));
 }
 
@@ -1114,6 +1159,13 @@ function viewContacts(me) {
         <button class="btn small" type="submit">Save contact</button>
         <button class="btn small secondary" id="cancelEdit" type="button" style="display:none">Cancel edit</button>
       </form>
+    </div>
+    <div class="card">
+      <h2>Import from Excel / CSV</h2>
+      <p class="sub">Upload an .xlsx, .xls or .csv file with your customers or suppliers. Recognised columns (any order, English or Latvian): Name / Nosaukums, Email, Phone / Telefons, Registration no. / Reģ. nr., VAT no. / PVN nr., Address / Adrese, Kind / Veids (customer or supplier). Rows with the same name or VAT number as an existing contact are skipped.</p>
+      <input type="file" id="importFile" accept=".xlsx,.xls,.csv" style="max-width:340px">
+      <button class="btn small secondary" id="exportCsv" type="button" style="margin-left:.5rem">Export CSV</button>
+      <p id="importMsg" class="sub"></p>
     </div>`);
 
   const $ = (id) => document.getElementById(id);
@@ -1177,12 +1229,82 @@ function viewContacts(me) {
       load();
     } catch (err) { showError(err.message); }
   };
+  $('importFile').onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    $('importMsg').textContent = 'Reading file…';
+    try {
+      await loadXlsx();
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+      const pick = (r, keys) => {
+        for (const k of Object.keys(r)) {
+          const lk = String(k).toLowerCase();
+          if (keys.some((t) => lk === t || lk.includes(t))) return String(r[k] ?? '').trim();
+        }
+        return '';
+      };
+      const contacts = [];
+      for (const r of rows) {
+        const name = pick(r, ['name', 'nosaukums', 'company', 'klient', 'piegād', 'supplier']);
+        if (!name) continue;
+        let kind = pick(r, ['kind', 'veids', 'type', 'tips']).toLowerCase();
+        kind = kind.includes('supplier') || kind.includes('piegād') ? 'supplier' : 'company';
+        contacts.push({
+          kind, name,
+          reg_no: pick(r, ['reg', 'reģ', 'registration']),
+          vat_no: pick(r, ['vat', 'pvn']),
+          email: pick(r, ['email', 'e-pasts', 'mail']),
+          phone: pick(r, ['phone', 'telef', 'tel']),
+          address: pick(r, ['address', 'adres', 'adrese']),
+        });
+      }
+      if (!contacts.length) { $('importMsg').textContent = 'No contacts found — is there a "Name" column?'; return; }
+      const res = await api('/api/contacts/import', 'POST', { contacts });
+      $('importMsg').textContent = `Added ${res.added} contact(s), ${contacts.length - res.added} already existed.`;
+      load();
+    } catch (err) { $('importMsg').textContent = ''; showError(err.message); }
+    e.target.value = '';
+  };
+  $('exportCsv').onclick = async () => {
+    try {
+      const list = await api('/api/contacts');
+      const escCsv = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+      const lines = ['Name,Kind,Registration no.,VAT no.,Email,Phone,Address'];
+      for (const c of list) lines.push([c.name, c.kind, c.reg_no, c.vat_no, c.email, c.phone, c.address].map(escCsv).join(','));
+      const a = document.createElement('a');
+      a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(lines.join('\n'));
+      a.download = 'contacts.csv';
+      a.click();
+    } catch (err) { showError(err.message); }
+  };
   load().catch((e) => showError(e.message));
 }
 
 function viewSettings(me) {
   appShell(me, 'settings', `
     <div class="topline"><h1>Settings</h1><span class="company-chip">🏢 ${esc(me.company)}</span></div>
+    <div class="card">
+      <h2>🌐 Language / Valoda</h2>
+      <p class="sub">Choose the language of the whole program — menus, documents and printed invoices. Default is English. / Izvēlieties valodu visai programmai — izvēlnes, dokumenti un izdrukas. Pēc noklusējuma — angļu.</p>
+      <select id="langSel" style="max-width:280px"></select>
+    </div>
+    <div class="card">
+      <h2>💾 Backups</h2>
+      <p class="sub">Reda keeps everything (documents, contacts, scanned originals) in one database file. Set a folder here and Reda will save a full copy there every day — or click "Back up now" any time. Keep the 30 newest copies, older ones are removed automatically.</p>
+      <div class="form-row">
+        <div style="grid-column:1 / -1"><label>Backup folder (full path on the server)</label>
+          <input id="bkFolder" placeholder="/home/janis/reda-backups" style="max-width:420px"></div>
+        <div style="grid-column:1 / -1"><label style="display:flex;gap:.4rem;align-items:center"><input type="checkbox" id="bkAuto"> Save a fresh copy automatically every day</label></div>
+        <button class="btn small" id="bkSave" type="button">Save settings</button>
+        <button class="btn small" id="bkRun" type="button" style="display:none">Back up now</button>
+        <a class="btn small secondary" id="bkDl" href="/api/backup/download" style="display:none;text-decoration:none">Download backup file</a>
+      </div>
+      <p class="sub" id="bkMsg"></p>
+      <div id="bkFiles"></div>
+    </div>
     <div class="card">
       <h2>Two-step verification (Microsoft Authenticator)</h2>
       <p class="sub" id="mfaStatus">${me.mfaEnabled
@@ -1262,6 +1384,46 @@ function viewSettings(me) {
   } else {
     document.getElementById('setupBtn').onclick = () => viewMfaSetup();
   }
+
+  // ---- language switch ----
+  const langSel = document.getElementById('langSel');
+  langSel.innerHTML = Object.entries(REDA_I18N.LANGS).map(([code, name]) =>
+    `<option value="${code}"${REDA_I18N.getLang() === code ? ' selected' : ''}>${name}</option>`).join('');
+  langSel.onchange = () => {
+    REDA_I18N.setLang(langSel.value);
+    document.documentElement.lang = langSel.value;
+    route(); // re-render the whole screen in the new language
+  };
+
+  // ---- backups ----
+  const bkMsg = document.getElementById('bkMsg');
+  const bkShow = (cfg) => {
+    document.getElementById('bkFolder').value = cfg.folder || '';
+    document.getElementById('bkAuto').checked = !!cfg.auto;
+    document.getElementById('bkRun').style.display = cfg.folder ? '' : 'none';
+    document.getElementById('bkDl').style.display = cfg.folder ? '' : 'none';
+    document.getElementById('bkFiles').innerHTML = (cfg.files || []).length
+      ? '<table><tr><th>File</th><th>Size</th><th>Created</th></tr>' +
+        cfg.files.map((f) => `<tr><td>${esc(f.name)}</td><td>${(f.size / 1024 / 1024).toFixed(1)} MB</td><td>${esc(f.created_at)}</td></tr>`).join('') + '</table>'
+      : '<p class="sub">No backups saved yet.</p>';
+  };
+  fetch('/api/backup').then((r) => r.json()).then((cfg) => bkShow(cfg)).catch(() => {});
+  document.getElementById('bkSave').onclick = async () => {
+    bkMsg.textContent = 'Saving…';
+    try {
+      const cfg = await api('/api/backup', 'POST', { folder: document.getElementById('bkFolder').value.trim(), auto: document.getElementById('bkAuto').checked });
+      bkMsg.textContent = 'Settings saved ✔';
+      bkShow(cfg);
+    } catch (e) { bkMsg.textContent = ''; showError(e.message); }
+  };
+  document.getElementById('bkRun').onclick = async () => {
+    bkMsg.textContent = 'Making backup…';
+    try {
+      const r = await api('/api/backup/run', 'POST', {});
+      bkMsg.textContent = 'Backup saved ✔ — ' + r.file;
+      bkShow(r);
+    } catch (e) { bkMsg.textContent = ''; showError(e.message); }
+  };
 
   // ---- company details & logo ----
   const coMsg = document.getElementById('coMsg');

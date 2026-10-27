@@ -277,6 +277,136 @@ async function handleApi(req, res, url) {
   }
 
   // ---- contacts (customer & supplier base) ---- tenant-isolated ----
+  // ---- scanned originals: the source PDF/photo is stored & linked to a document ----
+  // ---- backups (v12) ----
+  const getSetting = (k) => { const r = db.prepare('SELECT value FROM settings WHERE key = ?').get(k); return r ? r.value : ''; };
+  const setSetting = (k, v) => { db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(k, String(v)); };
+  const listBackups = (folder) => {
+    try {
+      return fs.readdirSync(folder)
+        .filter((f) => /^reda-backup-.*\.db$/.test(f))
+        .map((f) => { const st = fs.statSync(path.join(folder, f)); return { name: f, size: st.size, created_at: st.mtime.toISOString().slice(0, 19).replace('T', ' ') }; })
+        .sort((a, b) => b.name.localeCompare(a.name));
+    } catch { return []; }
+  };
+  const makeBackupInto = (folder) => {
+    const name = 'reda-backup-' + new Date().toISOString().slice(0, 23).replace(/[:T.]/g, '-') + '.db';
+    const dest = path.join(folder, name);
+    db.exec("VACUUM INTO '" + String(dest).replace(/'/g, "''") + "'"); // clean, safe copy of the whole database
+    return dest;
+  };
+  const pruneBackups = (folder) => { // keep the 30 newest
+    const names = listBackups(folder).map((f) => f.name);
+    for (const n of names.slice(30)) { try { fs.unlinkSync(path.join(folder, n)); } catch {} }
+  };
+  if (url.pathname === '/api/backup') {
+    const user = requireAuth(req, res); if (!user) return;
+    if (req.method === 'GET') {
+      const folder = getSetting('backup_folder');
+      return json(res, 200, { folder, auto: getSetting('backup_auto') === '1', files: folder ? listBackups(folder) : [] });
+    }
+    if (req.method === 'POST') { // save settings
+      const { folder, auto } = body || {};
+      if (typeof folder !== 'string' || folder.length > 300) return bad(res, 'Folder path is required');
+      let dir = folder.trim();
+      if (dir) {
+        try {
+          fs.mkdirSync(dir, { recursive: true });
+          const probe = path.join(dir, '.reda-write-test');
+          fs.writeFileSync(probe, 'ok'); fs.unlinkSync(probe);
+        } catch (e) { return bad(res, 'Cannot write to that folder: ' + e.message); }
+      }
+      setSetting('backup_folder', dir);
+      setSetting('backup_auto', auto ? '1' : '0');
+      return json(res, 200, { ok: true, folder: dir, auto: !!auto, files: dir ? listBackups(dir) : [] });
+    }
+  }
+  if (url.pathname === '/api/backup/run' && req.method === 'POST') { // back up now
+    const user = requireAuth(req, res); if (!user) return;
+    const folder = getSetting('backup_folder');
+    if (!folder) return bad(res, 'Set a backup folder first (Settings → Backups)');
+    try {
+      const dest = makeBackupInto(folder);
+      pruneBackups(folder);
+      return json(res, 201, { ok: true, file: path.basename(dest), files: listBackups(folder) });
+    } catch (e) { return bad(res, 'Backup failed: ' + e.message, 500); }
+  }
+  if (url.pathname === '/api/backup/download' && req.method === 'GET') { // download a fresh copy of the database
+    const user = requireAuth(req, res); if (!user) return;
+    const tmp = path.join(require('os').tmpdir(), 'reda-dl-' + Date.now() + '.db');
+    try {
+      db.exec("VACUUM INTO '" + tmp.replace(/'/g, "''") + "'");
+      const bytes = fs.readFileSync(tmp);
+      const name = 'reda-backup-' + new Date().toISOString().slice(0, 23).replace(/[:T.]/g, '-') + '.db';
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': 'attachment; filename="' + name + '"', 'Content-Length': bytes.length });
+      return res.end(bytes);
+    } catch (e) { return bad(res, 'Could not make a backup file', 500); }
+    finally { try { fs.unlinkSync(tmp); } catch {} }
+  }
+
+  if (url.pathname === '/api/scans') {
+    const user = requireAuth(req, res); if (!user) return;
+    if (req.method === 'GET') {
+      const rows = db.prepare('SELECT id, doc_number, filename, mime, created_at FROM scans WHERE tenant_id = ? ORDER BY id DESC LIMIT 200').all(user.tenant_id);
+      return json(res, 200, { scans: rows });
+    }
+    if (req.method === 'POST') {
+      const { filename, mime, data, doc_number } = body || {};
+      if (!data || typeof data !== 'string') return bad(res, 'File data is required');
+      const m = /^data:(image\/(?:png|jpeg|jpg|webp|gif)|application\/pdf);base64,(.+)$/.exec(data);
+      if (!m) return bad(res, 'Only PDF or image files can be stored');
+      const raw = m[2];
+      if (Buffer.byteLength(raw, 'base64') > 8 * 1024 * 1024) return bad(res, 'File too large (max 8 MB)');
+      const r = db.prepare('INSERT INTO scans (tenant_id, doc_number, filename, mime, data) VALUES (?, ?, ?, ?, ?)')
+        .run(user.tenant_id, String(doc_number || '').slice(0, 20), String(filename || 'scan').slice(0, 150), m[1], raw);
+      return json(res, 201, { ok: true, id: Number(r.lastInsertRowid) });
+    }
+    if (req.method === 'DELETE') {
+      const id = url.searchParams.get('id');
+      const r = db.prepare('DELETE FROM scans WHERE id = ? AND tenant_id = ?').run(id, user.tenant_id);
+      return json(res, r.changes ? 200 : 404, r.changes ? { ok: true } : { error: 'Not found' });
+    }
+    if (req.method === 'PATCH') { // link a scan to the document it became
+      const { id, doc_number } = body || {};
+      const r = db.prepare('UPDATE scans SET doc_number = ? WHERE id = ? AND tenant_id = ?')
+        .run(String(doc_number || '').slice(0, 20), id, user.tenant_id);
+      return json(res, r.changes ? 200 : 404, r.changes ? { ok: true } : { error: 'Not found' });
+    }
+  }
+  // the actual stored file (opens in the browser like a normal PDF/image)
+  if (req.method === 'GET' && url.pathname.startsWith('/api/scans/')) {
+    const user = requireAuth(req, res); if (!user) return;
+    const id = Number(url.pathname.split('/')[3]);
+    const row = db.prepare('SELECT mime, data FROM scans WHERE id = ? AND tenant_id = ?').get(id, user.tenant_id);
+    if (!row) return json(res, 404, { error: 'Not found' });
+    res.writeHead(200, { 'Content-Type': row.mime, 'Content-Disposition': 'inline', 'Cache-Control': 'private, max-age=60' });
+    return res.end(Buffer.from(row.data, 'base64'));
+  }
+
+  // ---- bulk contact import (Excel/CSV parsed in the browser) ----
+  if (url.pathname === '/api/contacts/import' && req.method === 'POST') {
+    const user = requireAuth(req, res); if (!user) return;
+    const list = Array.isArray(body && body.contacts) ? body.contacts.slice(0, 500) : [];
+    let added = 0;
+    const seen = new Set();
+    const existing = new Set(db.prepare('SELECT name, vat_no FROM contacts WHERE tenant_id = ?').all(user.tenant_id)
+      .map((c) => (c.vat_no ? 'v:' + c.vat_no : 'n:' + c.name.toLowerCase())));
+    for (const c of list) {
+      const name = String((c && c.name) || '').trim().slice(0, 200);
+      if (!name) continue;
+      const vat = String((c && c.vat_no) || '').trim().slice(0, 50);
+      const key = vat ? 'v:' + vat : 'n:' + name.toLowerCase();
+      if (seen.has(key) || existing.has(key)) continue; // no duplicates
+      seen.add(key);
+      db.prepare('INSERT INTO contacts (tenant_id, kind, name, reg_no, vat_no, email, phone, address) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(user.tenant_id, (c.kind === 'supplier' ? 'company' : c.kind) || 'company', name,
+          String(c.reg_no || '').slice(0, 50), vat, String(c.email || '').slice(0, 100),
+          String(c.phone || '').slice(0, 50), String(c.address || '').slice(0, 200));
+      added++;
+    }
+    return json(res, 201, { ok: true, added });
+  }
+
   if (url.pathname === '/api/contacts') {
     const user = requireAuth(req, res); if (!user) return;
     if (req.method === 'GET') {
@@ -601,6 +731,23 @@ const server = http.createServer(async (req, res) => {
 
 // tiny clean-up of expired sessions
 setInterval(() => db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now()), 60 * 60 * 1000).unref();
+
+// v12: automatic daily backup (if enabled in Settings → Backups)
+function autoBackup() {
+  try {
+    const get = (k) => { const r = db.prepare('SELECT value FROM settings WHERE key = ?').get(k); return r ? r.value : ''; };
+    const folder = get('backup_folder');
+    if (get('backup_auto') !== '1' || !folder) return;
+    const files = fs.readdirSync(folder).filter((f) => /^reda-backup-.*\.db$/.test(f));
+    const today = 'reda-backup-' + new Date().toISOString().slice(0, 10);
+    if (files.some((f) => f.startsWith(today))) return; // already saved today
+    const name = 'reda-backup-' + new Date().toISOString().slice(0, 23).replace(/[:T.]/g, '-') + '.db';
+    db.exec("VACUUM INTO '" + path.join(folder, name).replace(/'/g, "''") + "'");
+    console.log('Reda auto-backup saved: ' + name);
+  } catch (e) { console.error('Reda auto-backup failed:', e.message); }
+}
+setTimeout(autoBackup, 30 * 1000).unref();          // check shortly after start
+setInterval(autoBackup, 6 * 60 * 60 * 1000).unref(); // and then every 6 hours
 
 server.listen(PORT, () => {
   console.log(`Reda running at http://localhost:${PORT}`);

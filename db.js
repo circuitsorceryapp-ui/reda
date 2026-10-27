@@ -120,3 +120,34 @@ const invCols2 = db.prepare('PRAGMA table_info(invoices)').all().map((c) => c.na
 if (!invCols2.includes('bank_id')) {
   db.exec('ALTER TABLE invoices ADD COLUMN bank_id INTEGER'); // which of your bank accounts to be paid to
 }
+// v9.5: clean up company names that the older scan parser saved with Latvian header
+// prefixes — "01. Nosūtītājs: SIA X" becomes just "SIA X", so lists read simply.
+const cleanNamePrefix = (n) => String(n || '')
+  .replace(/^\s*\d{1,2}\s*[.)\-–]\s*/, '')
+  .replace(/^(pre[cč]u\s+)?(nos[ūu]t[īi]t[āa]js|nosutitajs|pieg[āa]d[āa]t[āa]js|s[ūu]t[īi]t[āa]js|sa[ņn][ēe]m[ēe]js|sanemejs|klients?|klientam|pirc[ēe]js|buyer|bill to|sold to|from|supplier|vendor|customer)\s*[:\-–]?\s*/i, '')
+  .replace(/["'„“”]+/g, '')
+  .replace(/[.,;:]+$/, '').trim();
+for (const [table, col] of [['contacts', 'name'], ['invoices', 'customer']]) {
+  try {
+    const rows = db.prepare(`SELECT id, ${col} AS n FROM ${table}`).all();
+    for (const r of rows) {
+      const c = cleanNamePrefix(r.n);
+      if (c && c !== r.n) db.prepare(`UPDATE ${table} SET ${col} = ? WHERE id = ?`).run(c, r.id);
+    }
+  } catch { /* table not created yet (fresh db) — fine */ }
+}
+// v11: scanned originals (PDF/photo) stored in the system, linked to a document number
+db.exec(`CREATE TABLE IF NOT EXISTS scans (
+  id INTEGER PRIMARY KEY,
+  tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+  doc_number TEXT DEFAULT '',
+  filename TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  data TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);`);
+// v12: backup settings (where to keep automatic backups)
+db.exec(`CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);`);
