@@ -1,0 +1,13 @@
+{
+  "name": "reda",
+  "version": "0.1.0",
+  "description": "Reda - Lite ERP for EU small businesses (multi-tenant starter: auth + company isolation + Microsoft Authenticator MFA)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "license": "MIT"
+}
