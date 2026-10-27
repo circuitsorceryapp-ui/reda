@@ -215,13 +215,24 @@ function parseInvoiceText(rawText) {
 
   // --- counterparty: line with a company form (SIA, AS, UAB, GmbH...) ---
   let customer = null;
+  let regNo = null;
   for (const line of lines) {
     if (/^(r[ēe][ķk]in[sa]|rekins|reknis|fakt[ūu]ra|invoice|saskaita|[čc]ek[s]?|nr|no|#)/i.test(line)) continue; // "Invoice #AB-77" is a number, not a company
     const c = line.match(/\b(SIA|A\/S|S\.A\.|AS|UAB|O[ÜU]|GmbH|MB|Ltd|Limited|LLC|Llc|Inc|Corp|Co\.|OY|AB|BV|NV|Sp\.A\.|Zrt|d\.o\.o\.|s\.r\.o\.|K\/S|PS|IK|IP|SC)(?!-\d)/);
     if (c && line.length < 80) {
-      customer = line
-        .replace(/^(bill to|invoice to|sold to|buyer|customer|klients?|klientam|saņēmējs|sanemejs)\s*[:\-]?\s*/i, '')
-        .replace(/[.,;:]+$/, '').trim();
+      let name = line;
+      // strip Latvian / English "sender/buyer" labels and list numbers: "01. Nosūtītājs:", "Piegādātājs:", "From:", "3)" …
+      name = name
+        .replace(/^\s*\d{1,2}\s*[.\)\-–]\s*/, '')
+        .replace(/^(pre[cč]u\s+)?(nos[ūu]t[īi]t[āa]js|nosutitajs|pieg[āa]d[āa]t[āa]js|s[ūu]t[īi]t[āa]js|sa[ņn][ēe]m[ēe]js|sanemejs|klients?|klientam|pirc[ēe]js|buyer|bill to|sold to|from|supplier|vendor|customer)\s*[:\-–]?\s*/i, '')
+        .replace(/["'„“”]+/g, '')
+        .trim();
+      // cut the name off at the first registration/VAT/extra-info part: keep a clean company name only
+      const cut = name.split(/\s+(?=(?:re[ğģg]\.?\s*nr|reg\.?\s*nr|re[ğģg]istr[āa]cijas|PVN|VAT|HRB|Invoice|Saskaita|R[ēe][ķk]ins)\b|\b[A-Z]{2,5}\d{4,}\b)/i)[0];
+      if (cut.trim()) name = cut.trim();
+      const rn = line.match(/\b(?:re[ğģg]\.?\s*nr|reg\.?\s*nr|re[ğģg]istr[āa]cijas\s*nr)\s*[:.]?\s*([A-Z]{0,3}[0-9]{6,15})/i);
+      if (rn) regNo = rn[1];
+      customer = name.slice(0, 80);
       break;
     }
   }
@@ -236,6 +247,7 @@ function parseInvoiceText(rawText) {
     due_date,
     invoiceNo,
     vat: vat ? vat[1] : null,
+    reg_no: regNo,
     rawAmountCount: amountMatches.length,
   };
 }
@@ -407,8 +419,12 @@ async function printDoc(me, d) {
   // company profile (details + logo) from Settings — appears on the letterhead
   let co = null;
   try { co = await api('/api/company'); } catch { co = null; }
+  // banking v9.4: the bank account chosen on the document (or the first/default one)
+  const banks = (co && Array.isArray(co.banks)) ? co.banks : [];
+  const bank = banks.length ? banks[(d.bank_id && banks[d.bank_id - 1]) ? d.bank_id - 1 : 0] : null;
+  const bankLine = bank ? `Bank: ${[bank.name, bank.iban, bank.swift].filter(Boolean).join(' · ')}` : (co && co.bank ? `Bank: ${co.bank}` : '');
   const coLines = co ? [co.address, co.reg_no ? `Reg. no. ${co.reg_no}` : '',
-    co.vat_no ? `VAT no. ${co.vat_no}` : '', co.bank ? `Bank: ${co.bank}` : '',
+    co.vat_no ? `VAT no. ${co.vat_no}` : '', bankLine,
     co.phone, co.email].filter(Boolean) : [];
   const TITLES = { quote: 'OFFER / QUOTE', delivery: 'DELIVERY NOTE', invoice: 'INVOICE', bill: 'PURCHASE BILL' };
   const paid = (d.paid_cents || 0) / 100;
@@ -483,6 +499,7 @@ async function printDoc(me, d) {
     <tr class="grand"><td class="grand">Total ${d.doc_type === 'quote' ? 'offered' : 'due'}</td><td class="amount grand">${fmt(remaining > 0 && d.doc_type !== 'quote' ? (d.amount_cents - (d.paid_cents || 0)) : d.amount_cents, d.currency)}</td></tr>
   </table>
   ${d.due_date ? `<div class="meta"><b>Payment/delivery due:</b> ${esc(d.due_date)}</div>` : ''}
+  ${bank && (d.doc_type === 'invoice' || d.doc_type === 'quote') ? `<div class="meta"><b>Pay to:</b> ${esc([bank.name, bank.iban, bank.swift].filter(Boolean).join(' · '))}</div>` : ''}
   <div class="meta"><b>Status:</b> ${esc(d.status)}</div>
   <div class="foot"><span>Printed on ${today}</span><span>Generated with Reda — lite ERP for small business</span></div>
 </body></html>`;
@@ -523,6 +540,7 @@ function viewDashboard(me) {
           <div id="contactSuggest" style="display:none;position:absolute;z-index:10;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.12);width:100%;max-height:220px;overflow:auto"></div>
         </div>
         <div><label>Currency</label><select id="currency"><option>EUR</option><option>USD</option><option>GBP</option></select></div>
+        <div><label>Bank account for payment</label><select id="bankSel"><option value="">— default (first) —</option></select></div>
         <div><label>Document date</label><input id="issue_date" type="date"></div>
         <div><label>Payment due date</label><input id="due_date" type="date"></div>
         <div style="grid-column: 1 / -1"><label>Note (optional)</label><input id="description" placeholder="Extra note for this document"></div>
@@ -726,7 +744,7 @@ function viewDashboard(me) {
         const remaining = d.amount_cents - d.paid_cents;
         return `
         <tr class="${dueState(d, remaining)}">
-          <td>${esc(d.number)}${d.parent_id ? `<div style="color:var(--muted);font-size:.75rem">← converted</div>` : ''}</td>
+          <td>${esc(d.number)}${d.parent_id ? `<div style="color:var(--muted);font-size:.75rem">← converted</div>` : ''}${/scanned/.test(d.description || '') ? `<span title="Scanned document — check fields by hand" style="display:inline-block;width:12px;height:12px;background:#dc2626;border-radius:2px;vertical-align:middle;margin-left:.4rem"></span><span style="color:#b91c1c;font-size:.72rem"> check</span>` : ''}</td>
           <td><span class="badge ${d.doc_type}">${TYPE_LABELS[d.doc_type]}</span></td>
           <td>${esc(d.customer)}${d.description ? `<div style="color:var(--muted);font-size:.8rem">${esc(d.description)}</div>` : ''}</td>
           <td>${fmt(d.amount_cents, d.currency)}</td>
@@ -930,20 +948,34 @@ function viewDashboard(me) {
       const parsed = parseInvoiceText(text);
       lastScan = { parsed, kind, preview };
       // show the original document next to the form so you can check it
+      const found = ['customer', 'amount', 'due_date', 'invoiceNo'].filter((k) => parsed[k]).length;
+      // red warning box when something could not be read — the user must check that place manually
+      const missing = [['customer', 'customer name'], ['amount', 'total amount'], ['due_date', 'payment due date']]
+        .filter(([k]) => !parsed[k]).map(([, label]) => label);
+      const warnBox = missing.length
+        ? `<div style="margin-top:.6rem;border:2px solid #dc2626;background:#fef2f2;color:#b91c1c;border-radius:8px;padding:.6rem .8rem;display:flex;gap:.6rem;align-items:flex-start">
+             <span style="width:16px;height:16px;background:#dc2626;border-radius:2px;flex:none;margin-top:2px"></span>
+             <span><b>Reading problem:</b> could not read ${missing.join(', ')}. 🔴 Fill these fields by hand — see the original below.</span>
+           </div>`
+        : '';
       if (preview) {
         document.getElementById('scanPreview').innerHTML = `
           <div style="position:relative;display:inline-block;border:1px solid var(--border);border-radius:10px;padding:.4rem;background:#fff">
-            <img src="${preview}" alt="Scanned original" style="max-height:300px;max-width:100%;border-radius:6px">
+            <img src="${preview}" alt="Scanned original" style="max-height:300px;max-width:100%;border-radius:6px${missing.length ? ';outline:3px solid #dc2626;outline-offset:2px' : ''}">
+            ${missing.length ? '<div style="position:absolute;top:.6rem;left:.6rem;width:18px;height:18px;background:#dc2626;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4)"></div>' : ''}
             <button type="button" id="scanClose" title="Close preview" style="position:absolute;top:.5rem;right:.5rem;background:rgba(0,0,0,.55);color:#fff;border:none;border-radius:7px;width:24px;height:24px;cursor:pointer">×</button>
-          </div>`;
+          </div>
+          ${warnBox}`;
         document.getElementById('scanPreview').style.display = 'block';
         document.getElementById('scanClose').onclick = () => {
           document.getElementById('scanPreview').style.display = 'none';
           document.getElementById('scanActions').style.display = 'none';
           status.textContent = '';
         };
+      } else if (warnBox) {
+        document.getElementById('scanPreview').innerHTML = warnBox;
+        document.getElementById('scanPreview').style.display = 'block';
       }
-      const found = ['customer', 'amount', 'due_date', 'invoiceNo'].filter((k) => parsed[k]).length;
       status.textContent = found
         ? `✅ Read the document (found ${found} of 4 fields). Check it in the preview and choose below how to use it.`
         : '⚠️ Could not read the fields reliably — try a sharper photo with better light, or fill in manually.';
@@ -953,7 +985,7 @@ function viewDashboard(me) {
     }
   };
 
-  const applyScan = (mode) => {
+  const applyScan = async (mode) => {
     if (!lastScan) return;
     const { parsed, kind } = lastScan;
     const parts = [];
@@ -975,7 +1007,26 @@ function viewDashboard(me) {
       document.getElementById('doc_type').value = 'bill';
       custInput.value = parsed.customer || '';
       document.getElementById('due_date').value = parsed.due_date || '';
-      document.getElementById('scanStatus').textContent = '✅ Filled as Purchase bill — check the fields, then press "Add document".';
+      // automatically save this supplier into the contact library (if not there yet)
+      try {
+        const q = encodeURIComponent(parsed.customer || parsed.vat || '');
+        const { contacts } = await api('/api/contacts' + (q ? `?q=${q}` : ''));
+        let supplier = contacts.find((c) => (parsed.customer && c.name === parsed.customer) || (parsed.vat && c.vat_no === parsed.vat));
+        if (!supplier) {
+          const r = await api('/api/contacts', 'POST', {
+            kind: 'company', name: parsed.customer || 'Unknown supplier (scanned)',
+            vat_no: parsed.vat || '', reg_no: parsed.reg_no || '',
+          });
+          supplier = { id: r.id, name: parsed.customer };
+          document.getElementById('scanStatus').textContent = `✅ Supplier "${parsed.customer}" saved to your contact library — filled as Purchase bill. Check the fields, then press "Add document".`;
+        } else {
+          document.getElementById('scanStatus').textContent = `✅ Supplier "${supplier.name}" was already in your library. Filled as Purchase bill — check the fields, then press "Add document".`;
+        }
+        document.getElementById('contact_id').value = supplier.id;
+        custInput.value = parsed.customer || supplier.name;
+      } catch {
+        document.getElementById('scanStatus').textContent = '✅ Filled as Purchase bill — check the fields, then press "Add document".';
+      }
     } else {
       // possibility 2: you're selling the same thing — copy only the total into your Invoice
       document.getElementById('doc_type').value = 'invoice';
@@ -1014,6 +1065,7 @@ function viewDashboard(me) {
         items: real.length ? real : null,
         vat_rate: getVatRate(),
         contact_id: document.getElementById('contact_id').value || null,
+        bank_id: document.getElementById('bankSel').value || null,
       });
       e.target.reset();
       document.getElementById('contact_id').value = '';
@@ -1024,6 +1076,13 @@ function viewDashboard(me) {
       load();
     } catch (err) { showError(err.message); }
   };
+  // fill the bank-account picker from your company profile (banking v9.4)
+  api('/api/company').then((co) => {
+    const sel = document.getElementById('bankSel');
+    if (!sel || !Array.isArray(co.banks) || !co.banks.length) return;
+    sel.innerHTML = '<option value="">— default (first) —</option>' + co.banks
+      .map((b, i) => `<option value="${i + 1}">${esc(`${b.name || 'Bank'} · ${b.iban || ''}`)}</option>`).join('');
+  }).catch(() => {});
   load().catch((e) => showError(e.message));
 }
 
@@ -1149,12 +1208,21 @@ function viewSettings(me) {
         <div style="grid-column:1 / -1"><label>Address</label><input id="co_address" placeholder="Street, city, postal code, country"></div>
         <div><label>Registration no.</label><input id="co_reg_no" placeholder="40001234567"></div>
         <div><label>VAT (PVN) no.</label><input id="co_vat_no" placeholder="LV40001234567"></div>
-        <div style="grid-column:1 / -1"><label>Bank account (IBAN)</label><input id="co_bank" placeholder="LV12 BANK 0000 0000 0000"></div>
+        <div style="grid-column:1 / -1"><label>Bank accounts (you can add more than one)</label>
+          <div id="bankList" style="display:grid;gap:.5rem"></div>
+          <button type="button" class="btn small secondary" id="addBankBtn" style="margin-top:.4rem">+ Add bank account</button>
+        </div>
         <div><label>Phone</label><input id="co_phone" placeholder="+371 20000000"></div>
         <div><label>Email</label><input id="co_email" type="email" placeholder="info@yourcompany.lv"></div>
         <button class="btn small" type="submit" style="grid-column:1 / -1">Save company details</button>
       </form>
       <div id="coMsg" class="ok-msg"></div>
+    </div>
+    <div class="card">
+      <h2>🧪 Demo data for testing</h2>
+      <p class="sub">Adds <b>10 fake documents</b> (paid invoices, an overdue one, purchase bills, stock goods, an offer) so you can safely test searching, colors, stock and money totals. Your real documents are not touched.</p>
+      <button class="btn small" id="demoBtn" type="button">➕ Add 10 demo documents</button>
+      <span id="demoMsg" class="sub" style="margin-left:.6rem"></span>
     </div>
     <div class="card">
       <h2>👥 People in your company (<span id="userCount">…</span>)</h2>
@@ -1209,11 +1277,38 @@ function viewSettings(me) {
     document.getElementById('co_address').value = p.address;
     document.getElementById('co_reg_no').value = p.reg_no;
     document.getElementById('co_vat_no').value = p.vat_no;
-    document.getElementById('co_bank').value = p.bank;
+    renderBanks(Array.isArray(p.banks) ? p.banks : []);
     document.getElementById('co_phone').value = p.phone;
     document.getElementById('co_email').value = p.email;
     renderLogo(p.has_logo);
   }
+  // ---- multiple bank accounts (banking v9.4) ----
+  const renderBanks = (banks) => {
+    const box = document.getElementById('bankList');
+    box.innerHTML = banks.length ? banks.map((b, i) => `
+      <div class="bank-row" data-i="${i}" style="display:grid;grid-template-columns:1fr 2fr 1fr auto;gap:.4rem">
+        <input class="bk-name" placeholder="Bank name (e.g. Swedbank)" value="${esc(b.name || '')}">
+        <input class="bk-iban" placeholder="IBAN (LV12 BANK 0000 0000 0000)" value="${esc(b.iban || '')}">
+        <input class="bk-swift" placeholder="SWIFT/BIC (optional)" value="${esc(b.swift || '')}">
+        <button type="button" class="btn small secondary bk-del">🗑</button>
+      </div>`).join('') : '<p class="sub" style="margin:0">No bank accounts yet — add one so customers know where to pay.</p>';
+    box.querySelectorAll('.bk-del').forEach((btn) => btn.onclick = () => {
+      const cur = collectBanks();
+      cur.splice(+btn.closest('.bank-row').dataset.i, 1);
+      renderBanks(cur);
+    });
+  };
+  const collectBanks = () => Array.from(document.querySelectorAll('#bankList .bank-row')).map((row) => ({
+    name: row.querySelector('.bk-name').value.trim(),
+    iban: row.querySelector('.bk-iban').value.trim(),
+    swift: row.querySelector('.bk-swift').value.trim(),
+  })).filter((b) => b.name || b.iban);
+  document.getElementById('addBankBtn').onclick = () => {
+    const cur = collectBanks();
+    if (cur.length >= 5) return coSay('⚠️ Up to 5 bank accounts.', true);
+    cur.push({ name: '', iban: '', swift: '' });
+    renderBanks(cur);
+  };
   function renderLogo(has) {
     document.getElementById('logoDel').style.display = has ? 'inline-block' : 'none';
     document.getElementById('logoPreview').innerHTML = has
@@ -1250,12 +1345,21 @@ function viewSettings(me) {
         address: document.getElementById('co_address').value,
         reg_no: document.getElementById('co_reg_no').value,
         vat_no: document.getElementById('co_vat_no').value,
-        bank: document.getElementById('co_bank').value,
+        banks: collectBanks(),
         phone: document.getElementById('co_phone').value,
         email: document.getElementById('co_email').value,
       });
       coSay('✅ Company details saved.');
     } catch (err) { coSay(`⚠️ ${err.message}`, true); }
+  };
+  // ---- demo data (10 fake documents) ----
+  document.getElementById('demoBtn').onclick = async () => {
+    const msg = document.getElementById('demoMsg');
+    msg.textContent = 'Adding…';
+    try {
+      await api('/api/demo', 'POST', {});
+      msg.textContent = '✅ 10 demo documents added — open the dashboard to see them.';
+    } catch (err) { msg.textContent = `⚠️ ${err.message}`; }
   };
   loadCompany().catch(() => {});
 

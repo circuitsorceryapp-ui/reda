@@ -215,10 +215,14 @@ async function handleApi(req, res, url) {
     if (req.method === 'GET') {
       const p = db.prepare('SELECT * FROM company_profile WHERE tenant_id = ?').get(user.tenant_id) || {};
       const tenant = db.prepare('SELECT name FROM tenants WHERE id = ?').get(user.tenant_id);
+      // banks: newer multi-account list; falls back to the old single "bank" field
+      let banks = [];
+      try { banks = JSON.parse(p.banks || '[]'); } catch { banks = []; }
+      if (!Array.isArray(banks) || !banks.length) banks = p.bank ? [{ name: 'Bank', iban: p.bank, swift: '' }] : [];
       return json(res, 200, {
         company: tenant ? tenant.name : '',
         address: p.address || '', reg_no: p.reg_no || '', vat_no: p.vat_no || '',
-        bank: p.bank || '', phone: p.phone || '', email: p.email || '',
+        bank: p.bank || '', banks, phone: p.phone || '', email: p.email || '',
         has_logo: !!p.logo_data,
       });
     }
@@ -226,12 +230,22 @@ async function handleApi(req, res, url) {
       const data = body || {};
       const cur = db.prepare('SELECT * FROM company_profile WHERE tenant_id = ?').get(user.tenant_id);
       const val = (k) => String(data[k] || '').slice(0, 300);
+      // banks come as an array from the Settings page — keep max 5 accounts, strings only
+      let banksJson = '';
+      if (Array.isArray(data.banks)) {
+        const banks = data.banks.slice(0, 5).map((b) => ({
+          name: String((b && b.name) || '').slice(0, 100),
+          iban: String((b && b.iban) || '').slice(0, 50),
+          swift: String((b && b.swift) || '').slice(0, 20),
+        })).filter((b) => b.iban || b.name);
+        banksJson = JSON.stringify(banks);
+      }
       if (cur) {
-        db.prepare('UPDATE company_profile SET address=?, reg_no=?, vat_no=?, bank=?, phone=?, email=?, updated_at=datetime(\'now\') WHERE tenant_id=?')
-          .run(val('address'), val('reg_no'), val('vat_no'), val('bank'), val('phone'), val('email'), user.tenant_id);
+        db.prepare('UPDATE company_profile SET address=?, reg_no=?, vat_no=?, bank=?, banks=?, phone=?, email=?, updated_at=datetime(\'now\') WHERE tenant_id=?')
+          .run(val('address'), val('reg_no'), val('vat_no'), val('bank'), banksJson, val('phone'), val('email'), user.tenant_id);
       } else {
-        db.prepare('INSERT INTO company_profile (tenant_id, address, reg_no, vat_no, bank, phone, email) VALUES (?,?,?,?,?,?,?)')
-          .run(user.tenant_id, val('address'), val('reg_no'), val('vat_no'), val('bank'), val('phone'), val('email'));
+        db.prepare('INSERT INTO company_profile (tenant_id, address, reg_no, vat_no, bank, banks, phone, email) VALUES (?,?,?,?,?,?,?,?)')
+          .run(user.tenant_id, val('address'), val('reg_no'), val('vat_no'), val('bank'), banksJson, val('phone'), val('email'));
       }
       return json(res, 200, { ok: true });
     }
@@ -316,6 +330,61 @@ async function handleApi(req, res, url) {
     // received = supplier's bill arrived & goods are in your warehouse · paid = money sent
   };
 
+  // ---- demo data: 10 fake documents so a new user can explore safely ----
+  if (req.method === 'POST' && url.pathname === '/api/demo') {
+    const user = requireAuth(req, res); if (!user) return;
+    const today = new Date();
+    const iso = (offsetDays) => new Date(today.getTime() + offsetDays * 86400000).toISOString().slice(0, 10);
+    const nextNo = (prefix) => {
+      const n = db.prepare(
+        `SELECT COALESCE(MAX(CAST(SUBSTR(number, 5) AS INTEGER)), 0) + 1 AS next
+         FROM invoices WHERE tenant_id = ? AND number LIKE ?`
+      ).get(user.tenant_id, prefix + '-%').next;
+      return `${prefix}-${String(n).padStart(4, '0')}`;
+    };
+    const addDoc = (type, customer, items, extra = {}) => {
+      const prefix = DOC_TYPES[type].prefix;
+      const clean = items.map(([code, name, qty, price]) => ({ code, name, qty, unit_price_cents: Math.round(price * 100) }));
+      const excl = clean.reduce((s, it) => s + Math.round(it.qty * it.unit_price_cents), 0);
+      const vat = Math.round(excl * 0.21);
+      const r = db.prepare(
+        `INSERT INTO invoices (tenant_id, number, customer, description, amount_cents, currency, issue_date, due_date, status, doc_type, items, vat_rate)
+         VALUES (?, ?, ?, ?, ?, 'EUR', ?, ?, ?, ?, ?, 21)`
+      ).run(user.tenant_id, nextNo(prefix), customer, extra.note || '', excl + vat, extra.issue || iso(0), extra.due || null, extra.status || 'draft', type, JSON.stringify(clean));
+      return { id: Number(r.lastInsertRowid), total: excl + vat };
+    };
+    const pay = (id, cents, on) => {
+      db.prepare('INSERT INTO payments (tenant_id, invoice_id, amount_cents, paid_on) VALUES (?, ?, ?, ?)')
+        .run(user.tenant_id, id, cents, on || iso(0));
+      // full payment flips the document to "paid" (same rule as the /payments endpoint)
+      const inv = db.prepare('SELECT status, amount_cents FROM invoices WHERE id = ? AND tenant_id = ?').get(id, user.tenant_id);
+      if (inv && inv.status !== 'paid' && cents >= inv.amount_cents) {
+        db.prepare('UPDATE invoices SET status = ? WHERE id = ? AND tenant_id = ?').run('paid', id, user.tenant_id);
+      }
+    };
+    // 1–2: paid sales invoices
+    let d = addDoc('invoice', 'SIA Celtnieks', [['4407', 'Oak planks 20mm', 30, 12.5]], { issue: iso(-40), due: iso(-10), status: 'sent', note: 'Decking boards' });
+    pay(d.id, d.total, iso(-15));
+    d = addDoc('invoice', 'Māja & Dārzs SIA', [['8716', 'Garden furniture set', 2, 189.9]], { issue: iso(-30), due: iso(-2), status: 'sent' });
+    pay(d.id, d.total, iso(-3));
+    // 3: partially paid invoice (due today)
+    d = addDoc('invoice', 'Jānis Bērziņš', [['9403', 'Fence panels', 10, 24.0]], { issue: iso(-14), due: iso(0), status: 'sent' });
+    pay(d.id, Math.round(d.total / 2), iso(-1));
+    // 4: overdue unpaid invoice (customer owes you — red)
+    addDoc('invoice', 'Kafejnīca "Ausma" SIA', [['7010', 'Coffee beans 1kg', 5, 22.5]], { issue: iso(-45), due: iso(-15), status: 'sent' });
+    // 5: freshly sent invoice
+    addDoc('invoice', 'Būvniecības Kooperatīvs', [['2523', 'Cement 25kg', 40, 4.2]], { issue: iso(-1), due: iso(13), status: 'sent' });
+    // 6–7: purchase bills (one received = in stock, one ordered = waiting)
+    addDoc('bill', 'Mežs SIA (sawmill)', [['4407', 'Oak planks 20mm', 50, 11.0]], { issue: iso(-20), due: iso(5), status: 'received', note: 'Supplier invoice MZ-1188' });
+    addDoc('bill', 'Baltic Hardware OÜ', [['2523', 'Cement 25kg', 60, 3.4]], { issue: iso(-2), due: iso(12), status: 'ordered' });
+    // 8: overdue supplier bill YOU must pay (red priority)
+    addDoc('bill', 'Krāsu Noliktava SIA', [['3209', 'Paint 10L', 12, 31.0]], { issue: iso(-35), due: iso(-5), status: 'received', note: 'Supplier invoice KN-0442' });
+    // 9–10: open offer + delivered delivery note
+    addDoc('quote', 'Viesnīca "Priedes"', [['9405', 'Custom stairs project', 1, 1200.0]], { issue: iso(-5), due: iso(25), status: 'sent' });
+    addDoc('delivery', 'SIA Celtnieks', [['4407', 'Oak planks 20mm', 30, 12.5]], { issue: iso(-12), due: iso(-12), status: 'delivered' });
+    return json(res, 201, { ok: true, created: 10 });
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/invoices') {
     const user = requireAuth(req, res); if (!user) return;
     // NOTE: tenant_id comes from the session, never from the request.
@@ -397,12 +466,14 @@ async function handleApi(req, res, url) {
     // document date: today by default, but the user can set any date (e.g. backdated)
     const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s || '');
     const issueDate = isDate(issue_date) ? issue_date : new Date().toISOString().slice(0, 10);
+    // optional: which of your bank accounts the customer should pay to (v9.4 banking)
+    const bankId = Number(body?.bank_id) > 0 ? Math.floor(Number(body.bank_id)) : null;
     db.prepare(
-      `INSERT INTO invoices (tenant_id, number, customer, description, amount_cents, currency, issue_date, due_date, status, doc_type, items, vat_rate, contact_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO invoices (tenant_id, number, customer, description, amount_cents, currency, issue_date, due_date, status, doc_type, items, vat_rate, contact_id, bank_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(user.tenant_id, number, customer, description || '',
       amountCents, (currency || 'EUR').toUpperCase(),
-      issueDate, due_date || null, 'draft', type, itemsJson, vatRate, contactId);
+      issueDate, due_date || null, 'draft', type, itemsJson, vatRate, contactId, bankId);
     return json(res, 201, { ok: true, number });
   }
 

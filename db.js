@@ -111,3 +111,12 @@ CREATE TABLE IF NOT EXISTS payments (
 CREATE INDEX IF NOT EXISTS idx_payments_tenant ON payments(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
 `);
+// v9.4: multiple bank accounts per company + optional bank chosen on each document
+const profCols = db.prepare('PRAGMA table_info(company_profile)').all().map((c) => c.name);
+if (!profCols.includes('banks')) {
+  db.exec("ALTER TABLE company_profile ADD COLUMN banks TEXT DEFAULT ''"); // JSON [{name, iban, swift}]
+}
+const invCols2 = db.prepare('PRAGMA table_info(invoices)').all().map((c) => c.name);
+if (!invCols2.includes('bank_id')) {
+  db.exec('ALTER TABLE invoices ADD COLUMN bank_id INTEGER'); // which of your bank accounts to be paid to
+}

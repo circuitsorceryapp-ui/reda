@@ -139,6 +139,26 @@ Payment warnings appear automatically:
 The **Unpaid** panel shows the same colours and sorts by priority: overdue
 first, then supplier bills **you** must pay, then customer debts.
 
+## 🏦 Bank accounts, scan improvements & demo data
+
+- **Multiple bank accounts** — Settings → Company details lets you add up to 5
+  bank accounts (name, IBAN, SWIFT). In the New document form you pick which
+  account the customer should pay to; the printed PDF shows "Pay to: …".
+  The first account is the default.
+- **Better reading of scanned documents** — Latvian headers like
+  "01. Nosūtītājs: SIA X Reg.nr. 400…" are now cleaned up: the customer field
+  gets just the company name, and the registration number is picked out.
+- **Red warning when reading fails** — if the scan cannot read the customer,
+  total or due date, a red box + red square marks the problem and tells you to
+  fill those fields by hand. Scanned documents keep a red "check" marker
+  in the document list until you verify them.
+- **Suppliers go to your library automatically** — when you scan a supplier
+  bill and save it as a Purchase bill, the supplier (name, VAT, reg. no.) is
+  saved into your contacts library automatically, or matched if it exists.
+- **🧪 Demo data** — Settings has a button that adds 10 fake documents
+  (paid/overdue/partial invoices, purchase bills, stock goods, an offer) so
+  you can safely test everything. Your real documents are untouched.
+
 ## Customer & supplier base
 
 The **👥 Customers & suppliers** page stores your contacts: company or private
