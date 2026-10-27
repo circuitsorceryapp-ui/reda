@@ -453,7 +453,8 @@ function viewDashboard(me) {
           <div id="contactSuggest" style="display:none;position:absolute;z-index:10;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.12);width:100%;max-height:220px;overflow:auto"></div>
         </div>
         <div><label>Currency</label><select id="currency"><option>EUR</option><option>USD</option><option>GBP</option></select></div>
-        <div><label>Due date</label><input id="due_date" type="date"></div>
+        <div><label>Document date</label><input id="issue_date" type="date"></div>
+        <div><label>Payment due date</label><input id="due_date" type="date"></div>
         <div style="grid-column: 1 / -1"><label>Note (optional)</label><input id="description" placeholder="Extra note for this document"></div>
 
         <div style="grid-column: 1 / -1">
@@ -523,7 +524,7 @@ function viewDashboard(me) {
             <button data-id="${d.id}" class="print">🖨 PDF</button>
             ${d.status === 'draft' ? `<button data-id="${d.id}" class="send">Mark sent</button>` : ''}
             ${d.doc_type === 'quote' ? `<button data-id="${d.id}" class="conv" data-to="invoice">→ Invoice</button><button data-id="${d.id}" class="conv" data-to="delivery">→ Delivery</button>` : ''}
-            ${d.doc_type === 'delivery' ? `<button data-id="${d.id}" class="conv" data-to="invoice">→ Invoice</button>` : ''}
+            ${d.doc_type === 'delivery' || d.doc_type === 'bill' ? `<button data-id="${d.id}" class="conv" data-to="invoice">→ Invoice</button>` : ''}
             ${payable && remaining > 0 ? `<button data-id="${d.id}" data-rem="${remaining / 100}" class="pay">💰 Pay</button>` : ''}
             ${d.status === 'sent' && d.doc_type === 'quote' ? `<button data-id="${d.id}" class="acc">✔ Accepted</button>` : ''}
             <button data-id="${d.id}" class="del danger">Delete</button>
@@ -574,8 +575,8 @@ function viewDashboard(me) {
       <td class="rowNo"></td>
       <td><input class="it-code" placeholder="SKU-1" maxlength="60"></td>
       <td><input class="it-name" placeholder="Product or service" maxlength="300"></td>
-      <td><input class="it-qty" type="number" step="0.001" min="0" value="${esc(String(qty))}"></td>
-      <td><input class="it-price" type="number" step="0.01" min="0" placeholder="0.00" value="${esc(String(price))}"></td>
+      <td><input class="it-qty" type="text" inputmode="decimal" placeholder="1" value="${esc(String(qty))}"></td>
+      <td><input class="it-price" type="text" inputmode="decimal" placeholder="0.00" value="${esc(String(price))}"></td>
       <td class="it-sum" style="text-align:right;white-space:nowrap">—</td>
       <td><button type="button" class="it-del danger" title="Remove line" style="padding:0 .4rem">×</button></td>`;
     itemsBody.appendChild(tr);
@@ -599,8 +600,8 @@ function viewDashboard(me) {
     const rate = Number(document.getElementById('vat_rate').value) || 0;
     let excl = 0;
     [...itemsBody.children].forEach((tr) => {
-      const qty = Number(tr.querySelector('.it-qty').value) || 0;
-      const price = Math.round((Number(tr.querySelector('.it-price').value) || 0) * 100);
+      const qty = Number(String(tr.querySelector('.it-qty').value).replace(',', '.')) || 0;
+      const price = Math.round((Number(String(tr.querySelector('.it-price').value).replace(',', '.')) || 0) * 100);
       const sum = Math.round(qty * price);
       tr.querySelector('.it-sum').textContent = sum ? fmt(sum) : '—';
       excl += sum;
@@ -616,6 +617,8 @@ function viewDashboard(me) {
     tr.querySelector(itemsBody.children.length === 1 ? '.it-name' : '.it-name').focus();
   };
   addRowEl(); // start with one empty line
+  // document date defaults to today, but the user can change it freely
+  document.getElementById('issue_date').value = new Date().toISOString().slice(0, 10);
 
   // ---- customer search (saved contacts: search by name, person, phone or email) ----
   const custInput = document.getElementById('customer');
@@ -685,22 +688,28 @@ function viewDashboard(me) {
   document.getElementById('invForm').onsubmit = async (e) => {
     e.preventDefault();
     try {
-      const items = collectItems().filter((it) => it.name || it.unit_price);
-      if (items.length && !items.every((it) => it.name && Number(it.qty) > 0)) {
+      const items = collectItems();
+      if (items.some((it) => (it.qty || it.unit_price) && !it.name)) {
+        return showError('One line has a price/quantity but no product name — please fill in the name or remove the line.');
+      }
+      const real = items.filter((it) => it.name);
+      if (real.length && !real.every((it) => it.name && Number(String(it.qty).replace(',', '.')) > 0)) {
         return showError('Every line needs a product name and a quantity bigger than 0.');
       }
       await api('/api/invoices', 'POST', {
         customer: custInput.value,
         currency: document.getElementById('currency').value,
         due_date: document.getElementById('due_date').value,
+        issue_date: document.getElementById('issue_date').value,
         description: document.getElementById('description').value,
         doc_type: document.getElementById('doc_type').value,
-        items: items.length ? items : null,
+        items: real.length ? real : null,
         vat_rate: document.getElementById('vat_rate').value,
         contact_id: document.getElementById('contact_id').value || null,
       });
       e.target.reset();
       document.getElementById('contact_id').value = '';
+      document.getElementById('issue_date').value = new Date().toISOString().slice(0, 10);
       itemsBody.innerHTML = '';
       addRowEl();
       updateTotals();

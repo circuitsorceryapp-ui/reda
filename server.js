@@ -260,7 +260,7 @@ async function handleApi(req, res, url) {
 
   if (req.method === 'POST' && url.pathname === '/api/invoices') {
     const user = requireAuth(req, res); if (!user) return;
-    const { customer, amount, currency, due_date, description, doc_type, items, vat_rate, contact_id } = body || {};
+    const { customer, amount, currency, due_date, description, doc_type, items, vat_rate, contact_id, issue_date } = body || {};
     const type = DOC_TYPES[doc_type] ? doc_type : 'invoice';
     if (!customer) return bad(res, 'Customer is required');
 
@@ -270,8 +270,8 @@ async function handleApi(req, res, url) {
       const clean = items.map((it) => ({
         code: String(it.code || '').slice(0, 60),
         name: String(it.name || '').slice(0, 300),
-        qty: Number(it.qty) || 0,
-        unit_price_cents: Math.round(Number(it.unit_price) * 100) || 0,
+        qty: Number(String(it.qty).replace(',', '.')) || 0,   // accept "2,5" like "2.5"
+        unit_price_cents: Math.round(Number(String(it.unit_price).replace(',', '.')) * 100) || 0,
       })).filter((it) => it.name && it.qty > 0 && it.unit_price_cents >= 0);
       if (!clean.length) return bad(res, 'Add at least one line with a product name and quantity');
       const excl = clean.reduce((s, it) => s + Math.round(it.qty * it.unit_price_cents), 0);
@@ -299,12 +299,15 @@ async function handleApi(req, res, url) {
        FROM invoices WHERE tenant_id = ? AND number LIKE ?`
     ).get(user.tenant_id, prefix + '-%').next;
     const number = `${prefix}-${String(n).padStart(4, '0')}`;
+    // document date: today by default, but the user can set any date (e.g. backdated)
+    const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s || '');
+    const issueDate = isDate(issue_date) ? issue_date : new Date().toISOString().slice(0, 10);
     db.prepare(
       `INSERT INTO invoices (tenant_id, number, customer, description, amount_cents, currency, issue_date, due_date, status, doc_type, items, vat_rate, contact_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(user.tenant_id, number, customer, description || '',
       amountCents, (currency || 'EUR').toUpperCase(),
-      new Date().toISOString().slice(0, 10), due_date || null, 'draft', type, itemsJson, vatRate, contactId);
+      issueDate, due_date || null, 'draft', type, itemsJson, vatRate, contactId);
     return json(res, 201, { ok: true, number });
   }
 
@@ -316,7 +319,7 @@ async function handleApi(req, res, url) {
     if (!target) return bad(res, 'Unknown target document type');
     const src = db.prepare('SELECT * FROM invoices WHERE id = ? AND tenant_id = ?').get(id, user.tenant_id);
     if (!src) return bad(res, 'Document not found', 404);
-    const allowed = { quote: ['delivery', 'invoice'], delivery: ['invoice'] };
+    const allowed = { quote: ['delivery', 'invoice'], delivery: ['invoice'], bill: ['invoice'] }; // bill → invoice: bought goods, sell them onward
     if (!allowed[src.doc_type]?.includes(to)) return bad(res, `Cannot convert a ${src.doc_type} to a ${to}`);
 
     const prefix = target.prefix;

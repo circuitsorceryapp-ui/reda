@@ -28,6 +28,7 @@ Open http://localhost:3000 — create your company workspace, add invoices, set 
 | Money overview: customers owe you / you owe suppliers / sales invoiced & paid | ✅ |
 | 📷 Invoice scanning: photo → auto-filled fields (OCR, in-browser) | ✅ prefill + human review |
 | 🧾 Line items: numbered rows (product, code, qty, unit price) with live totals | ✅ |
+| 📅 Editable document date (default: today) + payment due date on every document | ✅ |
 | VAT: 21 / 12 / 5 / 0 % — sums **without VAT**, VAT amount and **with VAT** computed server-side | ✅ |
 | 👥 Customer & supplier base: save contacts, search by company/person/phone/email/reg/VAT no | ✅ |
 | Customer autocomplete while writing invoices | ✅ search-as-you-type, links the contact |
@@ -53,7 +54,8 @@ Notes:
 1. **Offer (QUO)** — write an offer to a customer. Status: draft → sent → accepted/rejected.
 2. **Convert** the accepted offer → **Delivery note (DLV)** and/or → **Invoice (INV)** —
    customer, amount and description are copied, numbering is automatic per type.
-3. **Purchase bill (PUR)** — when a supplier invoices you (scan it in!).
+3. **Purchase bill (PUR)** — when a supplier invoices you (scan it in!). Bought goods to
+   resell? Press **→ Invoice** on the bill and it becomes a sales invoice with the same lines.
 4. **Payments** — record full or partial payments on invoices and bills; the status
    flips to "paid" automatically when the amount is covered, and back to "sent" if a
    payment is removed.
