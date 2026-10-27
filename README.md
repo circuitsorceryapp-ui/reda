@@ -55,7 +55,9 @@ Notes:
 2. **Convert** the accepted offer → **Delivery note (DLV)** and/or → **Invoice (INV)** —
    customer, amount and description are copied, numbering is automatic per type.
 3. **Purchase bill (PUR)** — when a supplier invoices you (scan it in!). Bought goods to
-   resell? Press **→ Invoice** on the bill and it becomes a sales invoice with the same lines.
+   resell? Press **→ Invoice** on the bill and it becomes a sales invoice with the same lines,
+   or press **➕ Lines** to copy just the products into the New document form and set your own
+   selling price (code is optional and can stay empty).
 4. **Payments** — record full or partial payments on invoices and bills; the status
    flips to "paid" automatically when the amount is covered, and back to "sent" if a
    payment is removed.

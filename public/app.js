@@ -525,6 +525,7 @@ function viewDashboard(me) {
             ${d.status === 'draft' ? `<button data-id="${d.id}" class="send">Mark sent</button>` : ''}
             ${d.doc_type === 'quote' ? `<button data-id="${d.id}" class="conv" data-to="invoice">→ Invoice</button><button data-id="${d.id}" class="conv" data-to="delivery">→ Delivery</button>` : ''}
             ${d.doc_type === 'delivery' || d.doc_type === 'bill' ? `<button data-id="${d.id}" class="conv" data-to="invoice">→ Invoice</button>` : ''}
+            ${d.items && d.items.length ? `<button data-id="${d.id}" class="reuse" title="Copy these products into the New document form">➕ Lines</button>` : ''}
             ${payable && remaining > 0 ? `<button data-id="${d.id}" data-rem="${remaining / 100}" class="pay">💰 Pay</button>` : ''}
             ${d.status === 'sent' && d.doc_type === 'quote' ? `<button data-id="${d.id}" class="acc">✔ Accepted</button>` : ''}
             <button data-id="${d.id}" class="del danger">Delete</button>
@@ -549,6 +550,23 @@ function viewDashboard(me) {
       const r = await api('/api/invoices/convert', 'POST', { id: +b.dataset.id, to: b.dataset.to });
       alert(`Created ${r.number} — it's in the list now.`);
       load();
+    });
+    // ➕ Lines: copy this document's products into the New document form (no retyping)
+    document.querySelectorAll('.reuse').forEach((b) => b.onclick = () => {
+      const src = docs.find((x) => x.id === +b.dataset.id);
+      if (!src || !src.items || !src.items.length) return;
+      itemsBody.innerHTML = ''; // start fresh with the copied lines
+      for (const it of src.items) {
+        addRowEl(it.code || '', it.name, it.qty, (it.unit_price_cents / 100).toFixed(2));
+      }
+      updateTotals();
+      // selling on what you bought? default to a sales invoice; customer stays empty for you to pick
+      if (src.doc_type === 'bill') document.getElementById('doc_type').value = 'invoice';
+      document.getElementById('contact_id').value = '';
+      custInput.value = '';
+      document.getElementById('invForm').scrollIntoView({ behavior: 'smooth' });
+      const n = src.items.length;
+      document.getElementById('scanStatus').textContent = `✅ ${n} product line${n > 1 ? 's' : ''} copied — set the customer and your selling price, then press "Add document".`;
     });
     document.querySelectorAll('.pay').forEach((b) => b.onclick = async () => {
       const input = prompt(`Payment amount (e.g. ${b.dataset.rem}):`, b.dataset.rem);
