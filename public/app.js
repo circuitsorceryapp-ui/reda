@@ -15,6 +15,39 @@ async function api(path, method = 'GET', body) {
 const fmt = (cents, cur) => new Intl.NumberFormat('en', { style: 'currency', currency: cur || 'EUR' }).format(cents / 100);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// EU VAT rates 2026 (standard + reduced, per national law). Presets only — you can always type a custom rate,
+// because countries change rates during the year and some goods (wood, medicine, books…) have their own rate.
+const EU_VAT = {
+  LV: { name: '🇱🇻 Latvia', rates: [21, 12, 5, 0] },
+  LT: { name: '🇱🇹 Lithuania', rates: [21, 12, 9, 0] },
+  EE: { name: '🇪🇪 Estonia', rates: [24, 13, 9, 0] },
+  FI: { name: '🇫🇮 Finland', rates: [25.5, 14, 13.5, 10, 0] },
+  SE: { name: '🇸🇪 Sweden', rates: [25, 12, 6, 0] },
+  DK: { name: '🇩🇰 Denmark', rates: [25, 0] },
+  DE: { name: '🇩🇪 Germany', rates: [19, 7, 0] },
+  PL: { name: '🇵🇱 Poland', rates: [23, 8, 5, 0] },
+  AT: { name: '🇦🇹 Austria', rates: [20, 13, 10, 0] },
+  BE: { name: '🇧🇪 Belgium', rates: [21, 12, 6, 0] },
+  NL: { name: '🇳🇱 Netherlands', rates: [21, 9, 0] },
+  LU: { name: '🇱🇺 Luxembourg', rates: [17, 14, 8, 3, 0] },
+  FR: { name: '🇫🇷 France', rates: [20, 10, 5.5, 2.1, 0] },
+  IT: { name: '🇮🇹 Italy', rates: [22, 10, 5, 4, 0] },
+  ES: { name: '🇪🇸 Spain', rates: [21, 10, 4, 0] },
+  PT: { name: '🇵🇹 Portugal', rates: [23, 13, 6, 0] },
+  IE: { name: '🇮🇪 Ireland', rates: [23, 13.5, 9, 4.8, 0] },
+  CZ: { name: '🇨🇿 Czechia', rates: [21, 12, 0] },
+  SK: { name: '🇸🇰 Slovakia', rates: [23, 19, 5, 0] },
+  HU: { name: '🇭🇺 Hungary', rates: [27, 18, 5, 0] },
+  RO: { name: '🇷🇴 Romania', rates: [21, 11, 9, 5, 0] },
+  BG: { name: '🇧🇬 Bulgaria', rates: [20, 9, 0] },
+  HR: { name: '🇭🇷 Croatia', rates: [25, 13, 5, 0] },
+  SI: { name: '🇸🇮 Slovenia', rates: [22, 9.5, 5, 0] },
+  GR: { name: '🇬🇷 Greece', rates: [24, 13, 6, 0] },
+  CY: { name: '🇨🇾 Cyprus', rates: [19, 9, 5, 0] },
+  MT: { name: '🇲🇹 Malta', rates: [18, 7, 5, 0] },
+};
+
+
 // ---------- invoice scanning (OCR runs in the browser; the image never leaves your PC) ----------
 let tesseractLoading = null;
 function loadTesseract() {
@@ -65,13 +98,19 @@ function loadXlsx() {
 // Extracts raw text from an uploaded file: photo (OCR), PDF (render + OCR) or Excel/CSV (direct — exact values, no OCR)
 async function fileToInvoiceText(file, onStatus) {
   const name = (file.name || '').toLowerCase();
+  const readDataUrl = () => new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
   if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
     onStatus('Reading spreadsheet…');
     await loadXlsx();
     const buf = await file.arrayBuffer();
     const wb = XLSX.read(buf, { type: 'array' });
     const text = wb.SheetNames.map((n) => XLSX.utils.sheet_to_csv(wb.Sheets[n])).join('\n');
-    return { text, kind: 'spreadsheet' };
+    return { text, kind: 'spreadsheet', preview: null };
   }
   if (name.endsWith('.pdf') || file.type === 'application/pdf') {
     onStatus('Opening PDF…');
@@ -80,6 +119,7 @@ async function fileToInvoiceText(file, onStatus) {
     const buf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
     let text = '';
+    let preview = null;
     const pages = Math.min(pdf.numPages, 3); // first 3 pages is enough for an invoice
     for (let p = 1; p <= pages; p++) {
       onStatus(`Reading PDF page ${p} of ${pages}…`);
@@ -88,18 +128,26 @@ async function fileToInvoiceText(file, onStatus) {
       const canvas = document.createElement('canvas');
       canvas.width = viewport.width; canvas.height = viewport.height;
       await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+      if (p === 1) { // keep page 1 as the visual preview of the original
+        const small = document.createElement('canvas');
+        const v2 = page.getViewport({ scale: 1.2 });
+        small.width = v2.width; small.height = v2.height;
+        await page.render({ canvasContext: small.getContext('2d'), viewport: v2 }).promise;
+        preview = small.toDataURL('image/jpeg', 0.75);
+      }
       const r = await Tesseract.recognize(canvas, 'eng');
       text += r.data.text + '\n';
     }
-    return { text, kind: 'pdf' };
+    return { text, kind: 'pdf', preview };
   }
   onStatus('Loading reading engine…');
   await loadTesseract();
+  const preview = await readDataUrl(); // the original photo IS the preview
   onStatus('Reading document… (this takes ~5–20 seconds)');
   const r = await Tesseract.recognize(file, 'eng', {
     logger: (l) => { if (l.status === 'recognizing text') onStatus(`Reading document… ${Math.round(l.progress * 100)}%`); },
   });
-  return { text: r.data.text, kind: 'image' };
+  return { text: r.data.text, kind: 'image', preview };
 }
 
 // Turns raw OCR text into form fields. Pure function — deliberately overridable by a human review.
@@ -162,14 +210,20 @@ function parseInvoiceText(rawText) {
 
   // --- invoice number ---
   let invoiceNo = null;
-  const noRe = /\b(?:r[ēe][ķk]in[sa]|rekins|reknis|invoice|saskaita|ček|cek|nr|no|#)[\s.:\-]*([A-Z0-9\-\/]*[0-9][A-Z0-9\-\/]*)/i;
+  const noRe = /\b(?:r[ēe][ķk]in[sa]|rekins|reknis|invoice|saskaita|ček|cek|nr|no|#)[\s.:#\-]*([A-Z0-9\-\/]*[0-9][A-Z0-9\-\/]*)/i;
   for (const line of lines) { const n = line.match(noRe); if (n) { invoiceNo = n[1]; break; } }
 
   // --- counterparty: line with a company form (SIA, AS, UAB, GmbH...) ---
   let customer = null;
   for (const line of lines) {
-    const c = line.match(/\b(SIA|A\/S|AS|S\.A\.|UAB|O[ÜU]|GmbH|MB|Ltd|Limited|LLC|Inc|K\/S|PS|IK|IP|SC)\b/i);
-    if (c && line.length < 80) { customer = line.replace(/[.,;:]+$/, '').trim(); break; }
+    if (/^(r[ēe][ķk]in[sa]|rekins|reknis|fakt[ūu]ra|invoice|saskaita|[čc]ek[s]?|nr|no|#)/i.test(line)) continue; // "Invoice #AB-77" is a number, not a company
+    const c = line.match(/\b(SIA|A\/S|S\.A\.|AS|UAB|O[ÜU]|GmbH|MB|Ltd|Limited|LLC|Llc|Inc|Corp|Co\.|OY|AB|BV|NV|Sp\.A\.|Zrt|d\.o\.o\.|s\.r\.o\.|K\/S|PS|IK|IP|SC)(?!-\d)/);
+    if (c && line.length < 80) {
+      customer = line
+        .replace(/^(bill to|invoice to|sold to|buyer|customer|klients?|klientam|saņēmējs|sanemejs)\s*[:\-]?\s*/i, '')
+        .replace(/[.,;:]+$/, '').trim();
+      break;
+    }
   }
 
   // --- VAT number (adds trust context) ---
@@ -349,18 +403,24 @@ function appShell(me, active, content) {
 }
 
 // ---------- printable PDF: opens a clean A4 layout the browser can print or save as PDF ----------
-function printDoc(me, d) {
+async function printDoc(me, d) {
+  // company profile (details + logo) from Settings — appears on the letterhead
+  let co = null;
+  try { co = await api('/api/company'); } catch { co = null; }
+  const coLines = co ? [co.address, co.reg_no ? `Reg. no. ${co.reg_no}` : '',
+    co.vat_no ? `VAT no. ${co.vat_no}` : '', co.bank ? `Bank: ${co.bank}` : '',
+    co.phone, co.email].filter(Boolean) : [];
   const TITLES = { quote: 'OFFER / QUOTE', delivery: 'DELIVERY NOTE', invoice: 'INVOICE', bill: 'PURCHASE BILL' };
   const paid = (d.paid_cents || 0) / 100;
   const remaining = (d.amount_cents - (d.paid_cents || 0)) / 100;
   const today = new Date().toLocaleDateString('en-GB');
   const hasItems = Array.isArray(d.items) && d.items.length > 0;
   const rowsHtml = hasItems ? d.items.map((it, i) => `
-    <tr><td>${i + 1}</td><td>${esc(it.code || '')}</td><td>${esc(it.name)}</td>
+    <tr><td>${i + 1}</td><td>${esc(it.code || '')}</td><td>${esc(it.name)}</td><td>${esc(it.tax_code || '')}</td>
     <td class="amount">${Number(it.qty)}</td>
     <td class="amount">${fmt(it.unit_price_cents, d.currency)}</td>
     <td class="amount">${fmt(Math.round(Number(it.qty) * it.unit_price_cents), d.currency)}</td></tr>`).join('') : `
-    <tr><td>1</td><td></td><td>${esc(d.description || 'As agreed')}</td>
+    <tr><td>1</td><td></td><td>${esc(d.description || 'As agreed')}</td><td></td>
     <td class="amount">1</td><td class="amount"></td><td class="amount">${fmt(d.amount_cents, d.currency)}</td></tr>`;
   const vatRows = hasItems ? `
     <tr><td>Sum without VAT</td><td class="amount">${fmt(d.total_excl_cents, d.currency)}</td></tr>
@@ -369,8 +429,11 @@ function printDoc(me, d) {
 <style>
   @page { size: A4; margin: 18mm 16mm; }
   body { font-family: Arial, Helvetica, sans-serif; color: #1c2733; font-size: 11pt; }
-  .head { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #0b5cad; padding-bottom: 10px; }
+  .head { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #0b5cad; padding-bottom: 10px; gap: 20px; }
+  .head img.logo { max-height: 56px; max-width: 180px; }
+  .company-wrap { display: flex; align-items: center; gap: 12px; }
   .company { font-size: 15pt; font-weight: bold; color: #0b5cad; }
+  .company-details { color: #64748b; font-size: 8.5pt; margin-top: 3px; line-height: 1.5; }
   .doctype { text-align: right; }
   .doctype h1 { margin: 0; font-size: 20pt; letter-spacing: 2px; color: #1c2733; }
   .doctype .num { color: #64748b; font-size: 10pt; margin-top: 4px; }
@@ -391,15 +454,24 @@ function printDoc(me, d) {
   .status { display: inline-block; padding: 3px 12px; border: 1px solid; border-radius: 999px; font-size: 9pt; font-weight: bold; text-transform: uppercase; }
 </style></head><body>
   <div class="head">
-    <div><div class="company">${esc(me.company)}</div><div style="color:#64748b;font-size:9.5pt;margin-top:3px">${esc(me.name)} · ${esc(me.email)}</div></div>
+    <div>
+      <div class="company-wrap">
+        ${co && co.has_logo ? '<img class="logo" src="/api/company/logo" alt="">' : ''}
+        <div>
+          <div class="company">${esc(me.company)}</div>
+          <div style="color:#64748b;font-size:9.5pt">${esc(me.name)}${co && co.phone ? ' · ' + esc(co.phone) : ''}${co && co.email ? ' · ' + esc(co.email) : ''}</div>
+          ${coLines.length ? `<div class="company-details">${coLines.map(esc).join('<br>')}</div>` : ''}
+        </div>
+      </div>
+    </div>
     <div class="doctype"><h1>${TITLES[d.doc_type]}</h1><div class="num">${esc(d.number)} · Issued: ${esc(d.issue_date)}</div></div>
   </div>
   <div class="parties">
-    <div class="party"><h3>From</h3><b>${esc(me.company)}</b></div>
+    <div class="party"><h3>From</h3><b>${esc(me.company)}</b>${coLines.length ? `<div style="font-size:9pt;color:#334155;margin-top:4px">${coLines.map(esc).join('<br>')}</div>` : ''}</div>
     <div class="party"><h3>To</h3><b>${esc(d.customer)}</b></div>
   </div>
   <table class="items">
-    <thead><tr><th style="width:20px">#</th><th style="width:80px">Code</th><th>Product / service</th><th class="amount">Qty</th><th class="amount">Unit price</th><th class="amount">Sum</th></tr></thead>
+    <thead><tr><th style="width:20px">#</th><th style="width:80px">Code</th><th>Product / service</th><th style="width:90px">Tax code</th><th class="amount">Qty</th><th class="amount">Unit price</th><th class="amount">Sum</th></tr></thead>
     <tbody>${rowsHtml}</tbody>
   </table>
   <table class="totals">
@@ -424,12 +496,17 @@ function printDoc(me, d) {
 function viewDashboard(me) {
   const TYPE_LABELS = { quote: 'Offer', delivery: 'Delivery note', invoice: 'Invoice', bill: 'Purchase bill' };
   let filter = 'all';
+  let custFilter = '';
+  let sortKey = 'new';
+  let docQuery = '';
 
   appShell(me, 'dashboard', `
     <div class="topline">
       <h1>Documents & money</h1>
       <span class="company-chip">🏢 ${esc(me.company)}</span>
     </div>
+    <div class="page-grid">
+    <div class="col-main">
     <div class="stat-grid" id="stats"></div>
     <div class="card">
       <h2>📷 Scan a document (optional)</h2>
@@ -437,6 +514,11 @@ function viewDashboard(me) {
       <input type="file" id="scanFile" accept="image/*,.pdf,.xlsx,.xls,.csv" hidden>
       <button class="btn small secondary" id="scanBtn" type="button">📷 Scan / photo / PDF / Excel</button>
       <span id="scanStatus" class="sub"></span>
+      <div id="scanPreview" style="display:none;margin-top:.8rem"></div>
+      <div id="scanActions" style="display:none;margin-top:.8rem;gap:.6rem;flex-wrap:wrap">
+        <button class="btn small secondary" id="scanBill" type="button">📥 This is a supplier bill — save it as Purchase bill</button>
+        <button class="btn small" id="scanSell" type="button">📤 I'm selling this — put total into my Invoice</button>
+      </div>
     </div>
     <div class="card">
       <h2>New document</h2>
@@ -460,18 +542,15 @@ function viewDashboard(me) {
         <div style="grid-column: 1 / -1">
           <label>Products / services</label>
           <table id="itemsTable" style="margin-bottom:.5rem">
-            <thead><tr><th style="width:2.2rem">#</th><th style="width:16%">Code</th><th>Product / service name</th><th style="width:5.5rem">Qty</th><th style="width:7rem">Unit price</th><th style="width:7.5rem">Line sum</th><th style="width:2rem"></th></tr></thead>
+            <thead><tr><th style="width:2.2rem">#</th><th style="width:14%">Code</th><th>Product / service name</th><th style="width:13%">Tax code (optional)</th><th style="width:5.5rem">Qty</th><th style="width:7rem">Unit price</th><th style="width:7.5rem">Line sum</th><th style="width:2rem"></th></tr></thead>
             <tbody id="itemsBody"></tbody>
           </table>
           <button class="btn small secondary" id="addRow" type="button">+ Add line</button>
         </div>
 
-        <div><label>VAT rate</label><select id="vat_rate">
-          <option value="21" selected>21%</option>
-          <option value="12">12%</option>
-          <option value="5">5%</option>
-          <option value="0">0% (no VAT)</option>
-        </select></div>
+        <div><label>VAT country (local law)</label><select id="vat_country"></select></div>
+        <div><label>VAT rate</label><select id="vat_rate"></select>
+          <input id="vat_custom" type="text" inputmode="decimal" placeholder="e.g. 25,5" style="display:none;margin-top:.3rem"></div>
         <div><label>Sum without VAT</label><input id="sum_excl" disabled placeholder="0.00"></div>
         <div><label>VAT amount</label><input id="sum_vat" disabled placeholder="0.00"></div>
         <div><label><b>Total with VAT</b></label><input id="sum_total" disabled style="font-weight:bold" placeholder="0.00"></div>
@@ -479,10 +558,37 @@ function viewDashboard(me) {
       </form>
       <div class="error-msg" id="err"></div>
     </div>
-    <div class="card">
-      <h2>Your documents</h2>
-      <div id="tabs"></div>
-      <div id="invList"><p class="empty">Loading…</p></div>
+    <div class="card" style="margin-top:1.2rem">
+      <h2>📦 My stock (inventory)</h2>
+      <p class="sub">What is in your warehouse right now. It counts goods received from purchase bills (steps “Received” or “Paid”) and takes out what you delivered (delivery notes marked “delivered” and invoices marked “sent” or “paid”).</p>
+      <input type="search" id="stockSearch" placeholder="🔎 Find a product…" style="margin:.4rem 0 .8rem">
+      <div id="stockBox"><p class="empty">Loading…</p></div>
+    </div>
+    <div class="panel-grid">
+      <div class="card"><h2>🛒 Purchase steps</h2><div id="pipeBox"><p class="empty">Loading…</p></div></div>
+      <div class="card"><h2>💼 By customer</h2><p class="sub" style="margin-bottom:.5rem">Click a customer to show only their documents. Red = still owes you.</p><div id="custBox"><p class="empty">Loading…</p></div></div>
+      <div class="card"><h2>💰 Unpaid — who to chase, what to pay</h2><p class="sub" style="margin-bottom:.5rem">🟡 yellow = payment due today · 🔴 red = overdue. Supplier bills = money YOU must pay — top priority.</p><div id="unpaidBox"><p class="empty">Loading…</p></div></div>
+    </div>
+    </div>
+    <aside class="side">
+      <div class="card">
+        <h2>Your documents</h2>
+        <input type="search" id="docSearch" placeholder="🔎 Search by word, name, number or amount…" style="width:100%;margin:.4rem 0 .8rem">
+        <div id="tabs"></div>
+        <div style="display:flex;gap:.6rem;align-items:center;margin:.6rem 0;flex-wrap:wrap">
+          <span class="sub" style="margin:0">Sort:</span>
+          <select id="sortSel" style="width:auto;padding:.3rem .5rem">
+            <option value="new">Newest first</option>
+            <option value="cust">Customer A–Z</option>
+            <option value="amount">Amount high → low</option>
+            <option value="due">Due date (soonest)</option>
+            <option value="unpaid">Unpaid first</option>
+          </select>
+          <span id="activeCustFilter" style="display:none"></span>
+        </div>
+        <div id="invList"><p class="empty">Loading…</p></div>
+      </div>
+    </aside>
     </div>`);
 
   async function load() {
@@ -502,14 +608,124 @@ function viewDashboard(me) {
         `<a href="#" data-tab="${k}" style="margin-right:1rem;${filter === k ? 'font-weight:700;text-decoration:underline' : ''}">${k === 'all' ? 'All' : TYPE_LABELS[k]} (${counts[k] || 0})</a>`).join('')}</p>`;
     document.querySelectorAll('#tabs a').forEach((a) => a.onclick = (e) => { e.preventDefault(); filter = a.dataset.tab; load(); });
 
-    const shown = filter === 'all' ? docs : docs.filter((d) => d.doc_type === filter);
+    // Right panel: purchase steps (bills)
+    const bills = docs.filter((d) => d.doc_type === 'bill');
+    const step = (st, label) => {
+      const b = bills.filter((x) => x.status === st);
+      const sum = b.reduce((s, x) => s + x.amount_cents - x.paid_cents, 0);
+      return `<div class="pipe-row"><span>${label}</span><b>${b.length}</b><span style="color:${sum > 0 ? 'var(--red)' : 'var(--green)'}">${b.length ? fmt(sum) : ''}</span></div>`;
+    };
+    document.getElementById('pipeBox').innerHTML = bills.length ? `
+      ${step('draft', '📝 1. Decided to buy')}
+      ${step('ordered', '📤 2. Ordered (email sent)')}
+      ${step('received', '📥 3. In stock')}
+      ${step('paid', '✔ 4. Paid')}
+      <p class="sub" style="margin-top:.5rem">Buttons on each bill row move it to the next step.</p>`
+      : '<p class="empty">No purchase bills yet. Scan a supplier bill and choose “Purchase bill”.</p>';
+
+    // Right panel: by customer (sales invoices)
+    const byCust = {};
+    docs.filter((d) => d.doc_type === 'invoice').forEach((d) => {
+      const k = d.customer || '(no name)';
+      byCust[k] = byCust[k] || { invoiced: 0, paid: 0 };
+      byCust[k].invoiced += d.amount_cents; byCust[k].paid += d.paid_cents;
+    });
+    const custRows = Object.entries(byCust).map(([name, v]) => ({ name, ...v, owed: v.invoiced - v.paid }))
+      .sort((a, b) => b.owed - a.owed);
+    document.getElementById('custBox').innerHTML = custRows.length ? custRows.map((c) => `
+      <div class="cust-row${custFilter === c.name ? ' active' : ''}" data-cust="${esc(c.name)}">
+        <span class="cust-name">${esc(c.name)}</span>
+        <span style="color:${c.owed > 0 ? 'var(--red)' : 'var(--green)'};white-space:nowrap">${fmt(c.owed)}</span>
+      </div>`).join('') : '<p class="empty">No sales invoices yet.</p>';
+    document.querySelectorAll('.cust-row').forEach((r) => r.onclick = () => {
+      custFilter = custFilter === r.dataset.cust ? '' : r.dataset.cust;
+      renderCustChip();
+      load();
+    });
+
+    // Panel: unpaid list — overdue first, then bills you must pay, then customer debts
+    const todayU = new Date().toISOString().slice(0, 10);
+    const dueStateU = (d) => !d.due_date ? '' : d.due_date < todayU ? 'overdue' : d.due_date === todayU ? 'due-today' : '';
+    const unpaid = docs.filter((d) => (d.doc_type === 'invoice' || d.doc_type === 'bill') && d.amount_cents - d.paid_cents > 0)
+      .sort((a, b) => {
+        const o = (x) => (x.due_date && x.due_date < todayU ? 0 : x.doc_type === 'bill' ? 1 : 2);
+        return o(a) - o(b) || String(a.due_date || '9999').localeCompare(String(b.due_date || '9999'));
+      });
+    document.getElementById('unpaidBox').innerHTML = unpaid.length ? unpaid.slice(0, 8).map((d) => `
+      <div class="unpaid-row ${dueStateU(d)}">
+        <span class="cust-name">${d.doc_type === 'bill' ? '🏭 <b>YOU PAY:</b> ' : ''}${esc(d.customer)}</span>
+        <span style="white-space:nowrap">${fmt(d.amount_cents - d.paid_cents, d.currency)}<div style="color:var(--muted);font-size:.75rem">due ${esc(d.due_date || '—')}${dueStateU(d) === 'overdue' ? ' 🔴 overdue' : dueStateU(d) === 'due-today' ? ' 🟡 today' : ''}</div></span>
+      </div>`).join('') + (unpaid.length > 8 ? `<p class="sub">…and ${unpaid.length - 8} more</p>` : '')
+      : '<p class="empty">Nothing unpaid. ✔</p>';
+
+    // Left column: my stock (goods in minus goods out)
+    const stock = {};
+    const moved = (d, dir) => {
+      (d.items || []).forEach((it) => {
+        const key = (it.code ? it.code + ' · ' : '') + (it.name || '').trim();
+        if (!key || key === ' · ') return;
+        stock[key] = stock[key] || { qty: 0, cost: 0, costN: 0 };
+        stock[key].qty += dir * (Number(it.qty) || 0);
+        if (dir > 0 && it.unit_price_cents >= 0) { stock[key].cost += Number(it.unit_price_cents) || 0; stock[key].costN++; }
+      });
+    };
+    docs.forEach((d) => {
+      if (d.doc_type === 'bill' && (d.status === 'received' || d.status === 'paid')) moved(d, 1);
+      if (d.doc_type === 'delivery' && d.status === 'delivered') moved(d, -1);
+      if (d.doc_type === 'invoice' && (d.status === 'sent' || d.status === 'paid')) moved(d, -1);
+    });
+    const stockRows = Object.entries(stock).map(([name, v]) => ({ name, qty: v.qty, unitCost: v.costN ? Math.round(v.cost / v.costN) : null }))
+      .sort((a, b) => b.qty - a.qty || a.name.localeCompare(b.name));
+    const renderStock = () => {
+      const q = (document.getElementById('stockSearch').value || '').toLowerCase();
+      const rows = stockRows.filter((r) => !q || r.name.toLowerCase().includes(q));
+      document.getElementById('stockBox').innerHTML = rows.length ? `
+        <table><thead><tr><th>Product</th><th>In stock</th><th>Unit cost (last)</th><th>Value</th></tr></thead>
+        <tbody>${rows.map((r) => `
+          <tr>
+            <td>${esc(r.name)}</td>
+            <td style="font-weight:700;color:${r.qty > 0 ? 'var(--green)' : r.qty < 0 ? 'var(--red)' : 'var(--muted)'}">${r.qty}</td>
+            <td>${r.unitCost != null ? fmt(r.unitCost) : '—'}</td>
+            <td>${r.unitCost != null ? fmt(Math.max(r.qty, 0) * r.unitCost) : '—'}</td>
+          </tr>`).join('')}</tbody></table>`
+        : '<p class="empty">No stock yet. Add products as lines to a purchase bill and press “📥 Received” when they arrive — they appear here automatically.</p>';
+    };
+    renderStock();
+    document.getElementById('stockSearch').oninput = renderStock;
+
+    function renderCustChip() {
+      const chip = document.getElementById('activeCustFilter');
+      if (!custFilter) { chip.style.display = 'none'; chip.innerHTML = ''; return; }
+      chip.style.display = 'inline-block';
+      chip.innerHTML = `<span class="badge invoice">${esc(custFilter)}</span> <a href="#" id="clearCust">✕ clear</a>`;
+      document.getElementById('clearCust').onclick = (e) => { e.preventDefault(); custFilter = ''; renderCustChip(); load(); };
+    }
+
+    let shown = filter === 'all' ? docs.slice() : docs.filter((d) => d.doc_type === filter);
+    if (custFilter) shown = shown.filter((d) => d.customer === custFilter);
+    // free-text search: number, name, note, status, amount, product lines — whatever the user types
+    if (docQuery) {
+      const q = docQuery.toLowerCase();
+      shown = shown.filter((d) =>
+        [d.number, d.customer, d.description, d.status, d.due_date,
+          (d.amount_cents / 100).toFixed(2), String(d.amount_cents / 100),
+          ...(d.items || []).flatMap((it) => [it.code, it.name])]
+          .some((v) => v != null && String(v).toLowerCase().includes(q)));
+    }
+    if (sortKey === 'cust') shown.sort((a, b) => String(a.customer).localeCompare(String(b.customer)));
+    else if (sortKey === 'amount') shown.sort((a, b) => b.amount_cents - a.amount_cents);
+    else if (sortKey === 'due') shown.sort((a, b) => String(a.due_date || '9999').localeCompare(String(b.due_date || '9999')));
+    else if (sortKey === 'unpaid') shown.sort((a, b) => (b.amount_cents - b.paid_cents) - (a.amount_cents - a.paid_cents));
+    const today = new Date().toISOString().slice(0, 10);
+    const dueState = (d, remaining) => (!d.due_date || remaining <= 0) ? ''
+      : d.due_date < today ? 'overdue' : d.due_date === today ? 'due-today' : '';
     document.getElementById('invList').innerHTML = shown.length ? `
       <table><thead><tr><th>№</th><th>Type</th><th>Customer</th><th>Amount</th><th>Paid</th><th>Remaining</th><th>Due</th><th>Status</th><th></th></tr></thead>
       <tbody>${shown.map((d) => {
         const payable = d.doc_type === 'invoice' || d.doc_type === 'bill';
         const remaining = d.amount_cents - d.paid_cents;
         return `
-        <tr>
+        <tr class="${dueState(d, remaining)}">
           <td>${esc(d.number)}${d.parent_id ? `<div style="color:var(--muted);font-size:.75rem">← converted</div>` : ''}</td>
           <td><span class="badge ${d.doc_type}">${TYPE_LABELS[d.doc_type]}</span></td>
           <td>${esc(d.customer)}${d.description ? `<div style="color:var(--muted);font-size:.8rem">${esc(d.description)}</div>` : ''}</td>
@@ -518,11 +734,13 @@ function viewDashboard(me) {
             ? `<td style="color:var(--green)">${fmt(d.paid_cents, d.currency)}</td>
                <td style="color:${remaining > 0 ? 'var(--red)' : 'var(--green)'}">${fmt(remaining, d.currency)}</td>`
             : '<td>—</td><td>—</td>'}
-          <td>${esc(d.due_date || '—')}</td>
+          <td>${esc(d.due_date || '—')}${dueState(d, remaining) === 'overdue' ? ' 🔴' : dueState(d, remaining) === 'due-today' ? ' 🟡' : ''}</td>
           <td><span class="badge ${d.status}">${d.status}</span></td>
           <td class="actions">
             <button data-id="${d.id}" class="print">🖨 PDF</button>
-            ${d.status === 'draft' ? `<button data-id="${d.id}" class="send">Mark sent</button>` : ''}
+            ${d.doc_type === 'bill' && d.status === 'draft' ? `<button data-id="${d.id}" class="send billstep" data-st="ordered">📤 Order</button>` : ''}
+            ${d.doc_type === 'bill' && d.status === 'ordered' ? `<button data-id="${d.id}" class="send billstep" data-st="received">📥 Received</button>` : ''}
+            ${d.status === 'draft' && d.doc_type !== 'bill' ? `<button data-id="${d.id}" class="send" data-st="sent">Mark sent</button>` : ''}
             ${d.doc_type === 'quote' ? `<button data-id="${d.id}" class="conv" data-to="invoice">→ Invoice</button><button data-id="${d.id}" class="conv" data-to="delivery">→ Delivery</button>` : ''}
             ${d.doc_type === 'delivery' || d.doc_type === 'bill' ? `<button data-id="${d.id}" class="conv" data-to="invoice">→ Invoice</button>` : ''}
             ${d.items && d.items.length ? `<button data-id="${d.id}" class="reuse" title="Copy these products into the New document form">➕ Lines</button>` : ''}
@@ -539,9 +757,13 @@ function viewDashboard(me) {
       if (d) printDoc(me, d);
     });
     document.querySelectorAll('.send').forEach((b) => b.onclick = async () => {
-      await api('/api/invoices/status', 'PATCH', { id: +b.dataset.id, status: 'sent' });
+      await api('/api/invoices/status', 'PATCH', { id: +b.dataset.id, status: b.dataset.st || 'sent' });
       load();
     });
+    const sortSel = document.getElementById('sortSel');
+    if (sortSel) sortSel.onchange = () => { sortKey = sortSel.value; load(); };
+    const ds = document.getElementById('docSearch');
+    if (ds) ds.oninput = () => { docQuery = ds.value.trim(); load(); };
     document.querySelectorAll('.acc').forEach((b) => b.onclick = async () => {
       await api('/api/invoices/status', 'PATCH', { id: +b.dataset.id, status: 'accepted' });
       load();
@@ -593,6 +815,7 @@ function viewDashboard(me) {
       <td class="rowNo"></td>
       <td><input class="it-code" placeholder="SKU-1" maxlength="60"></td>
       <td><input class="it-name" placeholder="Product or service" maxlength="300"></td>
+      <td><input class="it-tax" placeholder="Optional (CN/VAT)" maxlength="30" title="Tax/tariff code, e.g. 4407 for sawn wood — optional"></td>
       <td><input class="it-qty" type="text" inputmode="decimal" placeholder="1" value="${esc(String(qty))}"></td>
       <td><input class="it-price" type="text" inputmode="decimal" placeholder="0.00" value="${esc(String(price))}"></td>
       <td class="it-sum" style="text-align:right;white-space:nowrap">—</td>
@@ -610,12 +833,13 @@ function viewDashboard(me) {
     return [...itemsBody.children].map((tr) => ({
       code: tr.querySelector('.it-code').value.trim(),
       name: tr.querySelector('.it-name').value.trim(),
+      tax_code: tr.querySelector('.it-tax').value.trim(),
       qty: tr.querySelector('.it-qty').value,
       unit_price: tr.querySelector('.it-price').value,
     }));
   }
   function updateTotals() {
-    const rate = Number(document.getElementById('vat_rate').value) || 0;
+    const rate = Number(String(getVatRate()).replace(',', '.')) || 0;
     let excl = 0;
     [...itemsBody.children].forEach((tr) => {
       const qty = Number(String(tr.querySelector('.it-qty').value).replace(',', '.')) || 0;
@@ -629,7 +853,31 @@ function viewDashboard(me) {
     document.getElementById('sum_vat').value = (vat / 100).toFixed(2);
     document.getElementById('sum_total').value = ((excl + vat) / 100).toFixed(2);
   }
-  document.getElementById('vat_rate').addEventListener('change', updateTotals);
+  // ---- EU VAT picker: country presets (local law) + custom manual rate ----
+  const vatCountry = document.getElementById('vat_country');
+  const vatRateSel = document.getElementById('vat_rate');
+  const vatCustom = document.getElementById('vat_custom');
+  vatCountry.innerHTML = Object.entries(EU_VAT)
+    .map(([code, c]) => `<option value="${code}" ${code === 'LV' ? 'selected' : ''}>${c.name}</option>`).join('');
+  function populateRates() {
+    const rates = EU_VAT[vatCountry.value].rates;
+    vatRateSel.innerHTML = rates.map((r) => `<option value="${r}">${r}%${r === 0 ? ' (no VAT)' : ''}</option>`).join('')
+      + '<option value="custom">✏️ Other — type it…</option>';
+    vatCustom.style.display = 'none';
+    updateTotals();
+  }
+  const getVatRate = () => {
+    if (vatRateSel.value === 'custom') return vatCustom.value.trim();
+    return vatRateSel.value;
+  };
+  vatCountry.addEventListener('change', populateRates);
+  vatRateSel.addEventListener('change', () => {
+    vatCustom.style.display = vatRateSel.value === 'custom' ? 'block' : 'none';
+    if (vatRateSel.value === 'custom') vatCustom.focus();
+    updateTotals();
+  });
+  vatCustom.addEventListener('input', updateTotals);
+  populateRates();
   document.getElementById('addRow').onclick = () => {
     const tr = addRowEl();
     tr.querySelector(itemsBody.children.length === 1 ? '.it-name' : '.it-name').focus();
@@ -668,40 +916,78 @@ function viewDashboard(me) {
   });
   custInput.addEventListener('blur', () => setTimeout(() => suggestBox.style.display = 'none', 150));
 
+  // ---- scan flow: show the original + two ways to use it ----
+  let lastScan = null; // { parsed, kind, preview }
   document.getElementById('scanFile').onchange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     const status = document.getElementById('scanStatus');
     e.target.value = '';
+    document.getElementById('scanActions').style.display = 'none';
+    document.getElementById('scanPreview').style.display = 'none';
     try {
-      const { text, kind } = await fileToInvoiceText(file, (s) => status.textContent = s);
+      const { text, kind, preview } = await fileToInvoiceText(file, (s) => status.textContent = s);
       const parsed = parseInvoiceText(text);
-      if (parsed.customer) { custInput.value = parsed.customer; document.getElementById('contact_id').value = ''; }
-      document.getElementById('currency').value = parsed.currency;
-      if (parsed.due_date) document.getElementById('due_date').value = parsed.due_date;
-      const parts = [];
-      if (parsed.invoiceNo) parts.push(`Invoice ${parsed.invoiceNo}`);
-      if (parsed.vat) parts.push(`VAT ${parsed.vat}`);
-      document.getElementById('description').value = parts.length ? `${parts.join(', ')} (scanned — please check)` : '';
-      if (parsed.amount) {
-        // put the scanned total into one line; if it looks like it includes VAT, use it as "with VAT" total
-        itemsBody.innerHTML = '';
-        const rate = Number(document.getElementById('vat_rate').value) || 0;
-        const total = Math.round(Number(parsed.amount) * 100);
-        const excl = rate > 0 ? Math.round(total / (1 + rate / 100)) : total;
-        addRowEl('', 'Scanned item — please check', '1', (excl / 100).toFixed(2));
+      lastScan = { parsed, kind, preview };
+      // show the original document next to the form so you can check it
+      if (preview) {
+        document.getElementById('scanPreview').innerHTML = `
+          <div style="position:relative;display:inline-block;border:1px solid var(--border);border-radius:10px;padding:.4rem;background:#fff">
+            <img src="${preview}" alt="Scanned original" style="max-height:300px;max-width:100%;border-radius:6px">
+            <button type="button" id="scanClose" title="Close preview" style="position:absolute;top:.5rem;right:.5rem;background:rgba(0,0,0,.55);color:#fff;border:none;border-radius:7px;width:24px;height:24px;cursor:pointer">×</button>
+          </div>`;
+        document.getElementById('scanPreview').style.display = 'block';
+        document.getElementById('scanClose').onclick = () => {
+          document.getElementById('scanPreview').style.display = 'none';
+          document.getElementById('scanActions').style.display = 'none';
+          status.textContent = '';
+        };
       }
-      if (kind === 'spreadsheet') status.textContent = '✅ Read from spreadsheet — please check the fields, then press "Add document".';
-      else {
-        const found = ['customer', 'amount', 'due_date', 'invoiceNo'].filter((k) => parsed[k]).length;
-        status.textContent = found
-          ? `✅ Filled ${found} of 4 fields — please check & correct them, then press "Add document".`
-          : '⚠️ Could not read the fields reliably — try a sharper photo with better light, or fill in manually.';
-      }
+      const found = ['customer', 'amount', 'due_date', 'invoiceNo'].filter((k) => parsed[k]).length;
+      status.textContent = found
+        ? `✅ Read the document (found ${found} of 4 fields). Check it in the preview and choose below how to use it.`
+        : '⚠️ Could not read the fields reliably — try a sharper photo with better light, or fill in manually.';
+      document.getElementById('scanActions').style.display = 'flex';
     } catch (err) {
       status.textContent = `⚠️ ${err.message}`;
     }
   };
+
+  const applyScan = (mode) => {
+    if (!lastScan) return;
+    const { parsed, kind } = lastScan;
+    const parts = [];
+    if (parsed.invoiceNo) parts.push(`Invoice ${parsed.invoiceNo}`);
+    if (parsed.vat) parts.push(`VAT ${parsed.vat}`);
+    document.getElementById('description').value = parts.length ? `${parts.join(', ')} (scanned — please check)` : '';
+    document.getElementById('currency').value = parsed.currency;
+    itemsBody.innerHTML = '';
+    document.getElementById('contact_id').value = '';
+    if (parsed.amount) {
+      const rate = Number(String(getVatRate()).replace(',', '.')) || 0;
+      const total = Math.round(Number(parsed.amount) * 100);
+      // scanned totals usually include VAT: reverse it out for the "without VAT" line price
+      const excl = rate > 0 ? Math.round(total / (1 + rate / 100)) : total;
+      addRowEl('', 'Scanned goods — please check', '1', (excl / 100).toFixed(2));
+    }
+    if (mode === 'bill') {
+      // possibility 1: it's a supplier's document — save it as a Purchase bill
+      document.getElementById('doc_type').value = 'bill';
+      custInput.value = parsed.customer || '';
+      document.getElementById('due_date').value = parsed.due_date || '';
+      document.getElementById('scanStatus').textContent = '✅ Filled as Purchase bill — check the fields, then press "Add document".';
+    } else {
+      // possibility 2: you're selling the same thing — copy only the total into your Invoice
+      document.getElementById('doc_type').value = 'invoice';
+      custInput.value = '';
+      document.getElementById('due_date').value = '';
+      document.getElementById('scanStatus').textContent = '✅ Total copied into your Invoice — pick the customer, adjust the price to your selling price, then press "Add document".';
+    }
+    updateTotals();
+    document.getElementById('invForm').scrollIntoView({ behavior: 'smooth' });
+  };
+  document.getElementById('scanBill').onclick = () => applyScan('bill');
+  document.getElementById('scanSell').onclick = () => applyScan('sell');
 
   document.getElementById('invForm').onsubmit = async (e) => {
     e.preventDefault();
@@ -709,6 +995,10 @@ function viewDashboard(me) {
       const items = collectItems();
       if (items.some((it) => (it.qty || it.unit_price) && !it.name)) {
         return showError('One line has a price/quantity but no product name — please fill in the name or remove the line.');
+      }
+      const vRateNum = Number(String(getVatRate()).replace(',', '.'));
+      if (!Number.isFinite(vRateNum) || vRateNum < 0 || vRateNum > 100) {
+        return showError('VAT rate must be a number between 0 and 100 (e.g. 21 or 25,5).');
       }
       const real = items.filter((it) => it.name);
       if (real.length && !real.every((it) => it.name && Number(String(it.qty).replace(',', '.')) > 0)) {
@@ -722,7 +1012,7 @@ function viewDashboard(me) {
         description: document.getElementById('description').value,
         doc_type: document.getElementById('doc_type').value,
         items: real.length ? real : null,
-        vat_rate: document.getElementById('vat_rate').value,
+        vat_rate: getVatRate(),
         contact_id: document.getElementById('contact_id').value || null,
       });
       e.target.reset();
@@ -847,6 +1137,43 @@ function viewSettings(me) {
       </div>
     </div>
     <div class="card">
+      <h2>🏢 Company details & logo (used on printouts)</h2>
+      <p class="sub">These details and your logo appear automatically on every invoice/offer PDF you print.</p>
+      <div id="logoBox" style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap">
+        <div id="logoPreview" style="min-width:100px;min-height:50px;border:1px dashed var(--border);border-radius:10px;padding:.5rem;display:flex;align-items:center;justify-content:center;background:#fff"></div>
+        <input type="file" id="logoFile" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" hidden>
+        <button class="btn small secondary" id="logoBtn" type="button">📤 Upload logo</button>
+        <button class="btn small secondary" id="logoDel" type="button" style="display:none">🗑 Remove logo</button>
+      </div>
+      <form id="coForm" class="form-row">
+        <div style="grid-column:1 / -1"><label>Address</label><input id="co_address" placeholder="Street, city, postal code, country"></div>
+        <div><label>Registration no.</label><input id="co_reg_no" placeholder="40001234567"></div>
+        <div><label>VAT (PVN) no.</label><input id="co_vat_no" placeholder="LV40001234567"></div>
+        <div style="grid-column:1 / -1"><label>Bank account (IBAN)</label><input id="co_bank" placeholder="LV12 BANK 0000 0000 0000"></div>
+        <div><label>Phone</label><input id="co_phone" placeholder="+371 20000000"></div>
+        <div><label>Email</label><input id="co_email" type="email" placeholder="info@yourcompany.lv"></div>
+        <button class="btn small" type="submit" style="grid-column:1 / -1">Save company details</button>
+      </form>
+      <div id="coMsg" class="ok-msg"></div>
+    </div>
+    <div class="card">
+      <h2>👥 People in your company (<span id="userCount">…</span>)</h2>
+      <p class="sub">Everyone in this list logs in with their own email and works in the same company workspace. Up to 10 people at the same time.</p>
+      <div id="userList"><p class="empty">Loading…</p></div>
+      <form id="addUserForm" class="form-row">
+        <div><label>Name</label><input id="u_name" required placeholder="Jānis Bērziņš"></div>
+        <div><label>Email</label><input id="u_email" type="email" required placeholder="janis@yourcompany.lv"></div>
+        <div><label>Password (min 8)</label><input id="u_password" type="password" required minlength="8" placeholder="••••••••"></div>
+        <div><label>Role</label><select id="u_role">
+          <option value="accountant">Accountant (sees documents & contacts)</option>
+          <option value="sales">Sales (writes documents)</option>
+          <option value="owner">Owner (full control)</option>
+        </select></div>
+        <button class="btn small" type="submit" style="grid-column:1 / -1">Add person</button>
+      </form>
+      <p class="sub" id="userNote">Give the person their password personally and ask them to keep it safe. They log in on the same login page with their own email and this password.</p>
+    </div>
+    <div class="card">
       <h2>Company & account</h2>
       <table>
         <tr><td>Company</td><td><b>${esc(me.company)}</b></td></tr>
@@ -867,6 +1194,108 @@ function viewSettings(me) {
   } else {
     document.getElementById('setupBtn').onclick = () => viewMfaSetup();
   }
+
+  // ---- company details & logo ----
+  const coMsg = document.getElementById('coMsg');
+  const coSay = (text, bad = false) => {
+    coMsg.style.display = 'block';
+    coMsg.style.background = bad ? '#fef2f2' : '';
+    coMsg.style.borderColor = bad ? '#fecaca' : '';
+    coMsg.style.color = bad ? 'var(--red)' : '';
+    coMsg.textContent = text;
+  };
+  async function loadCompany() {
+    const p = await api('/api/company');
+    document.getElementById('co_address').value = p.address;
+    document.getElementById('co_reg_no').value = p.reg_no;
+    document.getElementById('co_vat_no').value = p.vat_no;
+    document.getElementById('co_bank').value = p.bank;
+    document.getElementById('co_phone').value = p.phone;
+    document.getElementById('co_email').value = p.email;
+    renderLogo(p.has_logo);
+  }
+  function renderLogo(has) {
+    document.getElementById('logoDel').style.display = has ? 'inline-block' : 'none';
+    document.getElementById('logoPreview').innerHTML = has
+      ? `<img src="/api/company/logo?${Date.now()}" alt="Company logo" style="max-height:60px;max-width:180px">`
+      : '<span class="sub" style="font-size:.8rem">No logo yet</span>';
+  }
+  document.getElementById('logoBtn').onclick = () => document.getElementById('logoFile').click();
+  document.getElementById('logoFile').onchange = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    coSay('Uploading logo…');
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result);
+        r.onerror = reject;
+        r.readAsDataURL(file);
+      });
+      await api('/api/company/logo', 'POST', { data: dataUrl });
+      coSay('✅ Logo saved — it will appear on every printout.');
+      renderLogo(true);
+    } catch (err) { coSay(`⚠️ ${err.message}`, true); }
+  };
+  document.getElementById('logoDel').onclick = async () => {
+    await api('/api/company/logo', 'DELETE');
+    coSay('Logo removed.');
+    renderLogo(false);
+  };
+  document.getElementById('coForm').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api('/api/company', 'POST', {
+        address: document.getElementById('co_address').value,
+        reg_no: document.getElementById('co_reg_no').value,
+        vat_no: document.getElementById('co_vat_no').value,
+        bank: document.getElementById('co_bank').value,
+        phone: document.getElementById('co_phone').value,
+        email: document.getElementById('co_email').value,
+      });
+      coSay('✅ Company details saved.');
+    } catch (err) { coSay(`⚠️ ${err.message}`, true); }
+  };
+  loadCompany().catch(() => {});
+
+  // ---- people in my company (max 10) ----
+  async function loadUsers() {
+    const { users, max } = await api('/api/users');
+    document.getElementById('userCount').textContent = `${users.length} of ${max}`;
+    const meId = me.email;
+    document.getElementById('userList').innerHTML = `
+      <table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>MFA</th><th></th></tr></thead>
+      <tbody>${users.map((u) => `
+        <tr>
+          <td><b>${esc(u.name)}</b>${u.email === meId ? ' <span class="sub">(you)</span>' : ''}</td>
+          <td>${esc(u.email)}</td>
+          <td>${esc(u.role)}</td>
+          <td>${u.mfa_enabled ? '✅' : '—'}</td>
+          <td class="actions">${u.email !== meId ? `<button data-id="${u.id}" data-name="${esc(u.name)}" class="udel danger">Remove</button>` : ''}</td>
+        </tr>`).join('')}</tbody></table>
+      ${users.length >= max ? '<p class="sub">⚠️ You have reached the 10-user limit for your company.</p>' : ''}`;
+    document.getElementById('userList').querySelectorAll('.udel').forEach((b) => b.onclick = async () => {
+      if (confirm(`Remove ${b.dataset.name}? They will be logged out and lose access.`)) {
+        try { await api('/api/users?id=' + b.dataset.id, 'DELETE'); loadUsers(); }
+        catch (err) { showError(err.message); }
+      }
+    });
+  }
+  document.getElementById('addUserForm').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api('/api/users', 'POST', {
+        name: document.getElementById('u_name').value,
+        email: document.getElementById('u_email').value,
+        password: document.getElementById('u_password').value,
+        role: document.getElementById('u_role').value,
+      });
+      e.target.reset();
+      loadUsers();
+    } catch (err) { showError(err.message); }
+  };
+  loadUsers().catch(() => {});
 }
 
 function showError(msg) {

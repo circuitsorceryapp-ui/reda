@@ -83,6 +83,21 @@ CREATE TABLE IF NOT EXISTS contacts (
 );
 CREATE INDEX IF NOT EXISTS idx_contacts_tenant ON contacts(tenant_id);
 `);
+// v8: company profile (shown on printouts) + logo (stored as base64, this keeps zero-npm-dep simplicity)
+db.exec(`
+CREATE TABLE IF NOT EXISTS company_profile (
+  tenant_id INTEGER PRIMARY KEY REFERENCES tenants(id),  -- the isolation key
+  address TEXT DEFAULT '',
+  reg_no TEXT DEFAULT '',
+  vat_no TEXT DEFAULT '',
+  bank TEXT DEFAULT '',
+  phone TEXT DEFAULT '',
+  email TEXT DEFAULT '',
+  logo_data TEXT,          -- base64-encoded image bytes, NULL = no logo
+  logo_mime TEXT,          -- e.g. image/png
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
 db.exec(`
 CREATE TABLE IF NOT EXISTS payments (
   id INTEGER PRIMARY KEY,

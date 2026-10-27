@@ -29,11 +29,13 @@ Open http://localhost:3000 — create your company workspace, add invoices, set 
 | 📷 Invoice scanning: photo → auto-filled fields (OCR, in-browser) | ✅ prefill + human review |
 | 🧾 Line items: numbered rows (product, code, qty, unit price) with live totals | ✅ |
 | 📅 Editable document date (default: today) + payment due date on every document | ✅ |
-| VAT: 21 / 12 / 5 / 0 % — sums **without VAT**, VAT amount and **with VAT** computed server-side | ✅ |
+| VAT: EU country presets (2026) or any manual rate incl. decimals (25,5%) | ✅ |
+| Optional tax/tariff (CN) code per line, e.g. 4407 for sawn wood | ✅ on screen & PDF |
 | 👥 Customer & supplier base: save contacts, search by company/person/phone/email/reg/VAT no | ✅ |
+| 🏢 Company details & logo: address, reg/VAT no, bank, phone, email + logo upload | ✅ shown on every printout |
 | Customer autocomplete while writing invoices | ✅ search-as-you-type, links the contact |
 | Session management (HttpOnly cookies, 12h expiry) | ✅ |
-| User roles (owner / accountant / sales) | 🚧 field exists, enforcement TODO |
+| 👥 Multiple people per company: owner adds users (up to **10**), roles owner/accountant/sales, remove = instant logout | ✅ role field exists; per-page permission enforcement TODO |
 | Purchasing, inventory, ledger, VAT reports | 📋 roadmap (see Architecture plan) |
 
 ## Invoice scanning (photo → pre-filled form)
@@ -41,8 +43,16 @@ Open http://localhost:3000 — create your company workspace, add invoices, set 
 On the dashboard, "📷 Scan / photo / PDF / Excel" lets you take a photo or pick an
 **image, PDF or Excel/CSV file** of an invoice. Reda reads it — OCR for photos and PDFs
 (Tesseract.js + pdf.js, **entirely inside your browser** — files never leave your
-computer), direct exact read for spreadsheets — and prefills customer, amount, currency,
-due date and invoice number. **You always review and confirm before saving.**
+computer), direct exact read for spreadsheets — and shows you **the original scan side
+by side** so you can check it. Then you choose **one of two ways** to use it:
+
+1. **📥 Save as Purchase bill** — it's your supplier's document: customer, total,
+   due date and invoice number are filled, saved as a purchase bill (money you owe).
+2. **📤 Put the total into my Invoice** — you're selling the same thing: only the
+   total is copied as one line into a fresh sales invoice; you pick your customer
+   and set your own selling price.
+
+In both cases **you always review and confirm before saving.**
 
 Notes:
 - First use needs internet (~15 MB engine downloads from CDNs, cached afterwards).
@@ -67,6 +77,16 @@ Notes:
    totals, paid/remaining, status). In the print dialog choose "Save as PDF" to get
    a file you can email to a customer.
 
+## EU VAT: country presets, custom rates & tax codes
+
+The New document form has a **VAT country** picker (all 27 EU countries with their
+current standard + reduced rates — presets as of 2026; countries change rates, so
+always double-check with your local law). Choose the country, pick the rate from
+the list, or select **"Other — type it…"** to enter any rate manually, including
+decimals like **25,5%** (Finland) or **5,5%** (France). Each product line also has
+an optional **tax code** field (VAT / tariff / CN code, e.g. `4407` for sawn wood) —
+printed on the PDF when filled, simply empty when not needed.
+
 ## Line items & VAT (invoices like real software)
 
 When you write an invoice, offer, delivery note or purchase bill you add **numbered
@@ -76,6 +96,49 @@ lines**: `1. 2. 3. …` with product **code**, **name**, **qty** and **unit pric
 **server** — the browser can never fake them. The printed PDF shows the full table
 (#, code, product, qty, unit price, line sum) plus the VAT breakdown.
 
+## Purchase → sell, step by step (right panel)
+
+Buying something now follows real life steps. A **Purchase bill** has four stages:
+
+1. **📝 Decided to buy** — you save the draft in Reda (`PUR-…`)
+2. **📤 Ordered** — you emailed the supplier (button "📤 Order")
+3. **📥 Received** — the bill arrived and the goods are in your warehouse (button "📥 Received")
+4. **✔ Paid** — money sent (the existing 💰 Pay button)
+
+The right side of the dashboard shows these counts and sums at all times, plus two
+more panels: **By customer** (click a customer to filter the document list and see
+who still owes you — red number) and **Unpaid** (invoices and bills with due dates,
+soonest first). The document list itself can be sorted (newest, customer A–Z,
+amount, due date, unpaid first).
+
+## 📦 My stock (inventory)
+
+The dashboard now shows what is in your warehouse right now. Stock is counted
+automatically, no extra typing:
+
+- **+ goods arrive** when a purchase bill reaches the “📥 Received” step (or is paid)
+- **− goods leave** with delivery notes marked “delivered” and invoices marked “sent” or “paid”
+
+Each product shows the quantity in stock (green), the last unit cost and the total
+value. A search box helps you find one product quickly. Nothing is deleted — if
+stock shows red (negative), you sold more than you registered as received.
+
+## 🔎 Search & payment alerts
+
+The dashboard now has **three sections**: left is the menu, the **middle is
+“Documents & money”** (totals, scanning, new document, stock, purchase steps,
+customers, unpaid priorities) and the **right side is “Your documents”** — the
+full list with a **search box**: type any word, name, product, number or amount
+and it finds the document instantly.
+
+Payment warnings appear automatically:
+
+- 🟡 **yellow row** — payment is due **today**
+- 🔴 **red row** — payment is **overdue**
+
+The **Unpaid** panel shows the same colours and sorts by priority: overdue
+first, then supplier bills **you** must pay, then customer debts.
+
 ## Customer & supplier base
 
 The **👥 Customers & suppliers** page stores your contacts: company or private
@@ -84,6 +147,23 @@ person, registration no., VAT (PVN) no., email, phone, address. Search works by
 invoice, start typing in the customer field and matching contacts appear in a
 dropdown — click one and it's filled and linked to the document. Deleting a contact
 never breaks old documents (they keep the saved name).
+
+## Company details & logo on printouts
+
+In **Settings** you can fill in your company's address, registration no., VAT no.,
+bank account, phone and email, and **upload your logo** (PNG/JPG/SVG up to ~400 KB).
+Every printed PDF gets a proper letterhead: logo next to your company name, the
+details under it, and a "From" block with the same information — so your customers
+see a fully professional invoice. Data and logo are per-company (tenant-isolated).
+
+## People in your company (up to 10)
+
+In **Settings**, the owner sees everyone in the company and can add people
+(name, email, password, role: owner / accountant / sales). Each added person logs in
+on the same login page with their own email and password and works in the same
+company workspace — same documents, contacts and money overview. Limit: **10 users
+per company**. Removing a person logs them out immediately. Only the owner can
+add or remove users.
 
 ## How isolation works (the important part)
 

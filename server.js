@@ -12,6 +12,7 @@ const {
 } = require('./crypto');
 
 const PORT = process.env.PORT || 3000;
+const MAX_USERS_PER_TENANT = 10; // how many people can work in one company at the same time
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png',
@@ -82,6 +83,41 @@ async function handleApi(req, res, url) {
   const body = await readBody(req);
 
   // ---- auth ----
+  // ---- users of my company (up to MAX_USERS_PER_TENANT people can work together) ----
+  if (url.pathname === '/api/users') {
+    const user = requireAuth(req, res); if (!user) return;
+    const isOwner = user.role === 'owner';
+    if (req.method === 'GET') {
+      const users = db.prepare(
+        'SELECT id, name, email, role, totp_enabled AS mfa_enabled, created_at FROM users WHERE tenant_id = ? ORDER BY id'
+      ).all(user.tenant_id);
+      return json(res, 200, { users, max: MAX_USERS_PER_TENANT });
+    }
+    if (!isOwner) return bad(res, 'Only the owner can add or remove users', 403);
+    if (req.method === 'POST') {
+      const { name, email, password, role } = body || {};
+      if (!name || !email || !password) return bad(res, 'Name, email and password are required');
+      if (password.length < 8) return bad(res, 'Password must be at least 8 characters');
+      const roleOk = ['owner', 'accountant', 'sales'].includes(role) ? role : 'accountant';
+      const count = db.prepare('SELECT COUNT(*) AS c FROM users WHERE tenant_id = ?').get(user.tenant_id).c;
+      if (count >= MAX_USERS_PER_TENANT) return bad(res, `Limit reached: max ${MAX_USERS_PER_TENANT} users per company`, 409);
+      if (db.prepare('SELECT id FROM users WHERE email = ?').get(String(email).toLowerCase()))
+        return bad(res, 'A user with this email already exists', 409);
+      db.prepare('INSERT INTO users (tenant_id, name, email, password_hash, role) VALUES (?, ?, ?, ?, ?)')
+        .run(user.tenant_id, String(name).slice(0, 100), String(email).trim().toLowerCase(), hashPassword(password), roleOk);
+      return json(res, 201, { ok: true });
+    }
+    if (req.method === 'DELETE') {
+      const id = url.searchParams.get('id');
+      if (+id === user.id) return bad(res, 'You cannot remove yourself');
+      const target = db.prepare('SELECT id FROM users WHERE id = ? AND tenant_id = ?').get(id, user.tenant_id);
+      if (!target) return json(res, 404, { error: 'Not found' });
+      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id); // log them out too
+      db.prepare('DELETE FROM users WHERE id = ? AND tenant_id = ?').run(id, user.tenant_id);
+      return json(res, 200, { ok: true });
+    }
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/register') {
     const { companyName, name, email, password } = body || {};
     if (!companyName || !name || !email || !password) return bad(res, 'All fields are required');
@@ -172,6 +208,60 @@ async function handleApi(req, res, url) {
     return json(res, 200, { ok: true });
   }
 
+  // ---- company profile (details + logo for printouts) ---- tenant-isolated ----
+  const PROFILE_FIELDS = ['address', 'reg_no', 'vat_no', 'bank', 'phone', 'email'];
+  if (url.pathname === '/api/company') {
+    const user = requireAuth(req, res); if (!user) return;
+    if (req.method === 'GET') {
+      const p = db.prepare('SELECT * FROM company_profile WHERE tenant_id = ?').get(user.tenant_id) || {};
+      const tenant = db.prepare('SELECT name FROM tenants WHERE id = ?').get(user.tenant_id);
+      return json(res, 200, {
+        company: tenant ? tenant.name : '',
+        address: p.address || '', reg_no: p.reg_no || '', vat_no: p.vat_no || '',
+        bank: p.bank || '', phone: p.phone || '', email: p.email || '',
+        has_logo: !!p.logo_data,
+      });
+    }
+    if (req.method === 'POST') {
+      const data = body || {};
+      const cur = db.prepare('SELECT * FROM company_profile WHERE tenant_id = ?').get(user.tenant_id);
+      const val = (k) => String(data[k] || '').slice(0, 300);
+      if (cur) {
+        db.prepare('UPDATE company_profile SET address=?, reg_no=?, vat_no=?, bank=?, phone=?, email=?, updated_at=datetime(\'now\') WHERE tenant_id=?')
+          .run(val('address'), val('reg_no'), val('vat_no'), val('bank'), val('phone'), val('email'), user.tenant_id);
+      } else {
+        db.prepare('INSERT INTO company_profile (tenant_id, address, reg_no, vat_no, bank, phone, email) VALUES (?,?,?,?,?,?,?)')
+          .run(user.tenant_id, val('address'), val('reg_no'), val('vat_no'), val('bank'), val('phone'), val('email'));
+      }
+      return json(res, 200, { ok: true });
+    }
+  }
+  if (url.pathname === '/api/company/logo') {
+    const user = requireAuth(req, res); if (!user) return;
+    if (req.method === 'GET') {
+      const p = db.prepare('SELECT logo_data, logo_mime FROM company_profile WHERE tenant_id = ?').get(user.tenant_id);
+      if (!p || !p.logo_data) return json(res, 404, { error: 'No logo' });
+      res.writeHead(200, { 'Content-Type': p.logo_mime, 'Cache-Control': 'no-cache' });
+      return res.end(Buffer.from(p.logo_data, 'base64'));
+    }
+    if (req.method === 'POST') {
+      // client sends a data URL: "data:image/png;base64,AAAA..."
+      const m = String((body || {}).data || '').match(/^data:(image\/(png|jpeg|jpg|gif|webp|svg\+xml));base64,(.+)$/);
+      if (!m) return bad(res, 'Please choose a PNG, JPG, GIF, WebP or SVG image');
+      const b64 = m[3];
+      if (b64.length > 600_000) return bad(res, 'Logo is too big — please use an image under ~400 KB');
+      db.prepare(`INSERT INTO company_profile (tenant_id, logo_data, logo_mime, updated_at)
+        VALUES (?, ?, ?, datetime('now'))
+        ON CONFLICT(tenant_id) DO UPDATE SET logo_data = excluded.logo_data, logo_mime = excluded.logo_mime, updated_at = datetime('now')`)
+        .run(user.tenant_id, b64, m[1]);
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'DELETE') {
+      db.prepare('UPDATE company_profile SET logo_data = NULL, logo_mime = NULL WHERE tenant_id = ?').run(user.tenant_id);
+      return json(res, 200, { ok: true });
+    }
+  }
+
   // ---- contacts (customer & supplier base) ---- tenant-isolated ----
   if (url.pathname === '/api/contacts') {
     const user = requireAuth(req, res); if (!user) return;
@@ -221,7 +311,9 @@ async function handleApi(req, res, url) {
     quote:    { prefix: 'QUO', statuses: ['draft', 'sent', 'accepted', 'rejected'], payable: false },
     delivery: { prefix: 'DLV', statuses: ['draft', 'sent', 'delivered'],           payable: false },
     invoice:   { prefix: 'INV', statuses: ['draft', 'sent', 'paid'],                payable: true },
-    bill:     { prefix: 'PUR', statuses: ['draft', 'sent', 'paid'],                 payable: true },
+    bill:     { prefix: 'PUR', statuses: ['draft', 'ordered', 'received', 'sent', 'paid'], payable: true },
+    // purchase steps: draft = you decided to buy · ordered = you emailed the order ·
+    // received = supplier's bill arrived & goods are in your warehouse · paid = money sent
   };
 
   if (req.method === 'GET' && url.pathname === '/api/invoices') {
@@ -270,12 +362,15 @@ async function handleApi(req, res, url) {
       const clean = items.map((it) => ({
         code: String(it.code || '').slice(0, 60),
         name: String(it.name || '').slice(0, 300),
+        tax_code: String(it.tax_code || '').slice(0, 30), // optional VAT/tariff (CN) code, e.g. 4407 for sawn wood
         qty: Number(String(it.qty).replace(',', '.')) || 0,   // accept "2,5" like "2.5"
         unit_price_cents: Math.round(Number(String(it.unit_price).replace(',', '.')) * 100) || 0,
       })).filter((it) => it.name && it.qty > 0 && it.unit_price_cents >= 0);
       if (!clean.length) return bad(res, 'Add at least one line with a product name and quantity');
       const excl = clean.reduce((s, it) => s + Math.round(it.qty * it.unit_price_cents), 0);
-      vatRate = Math.max(0, Math.min(100, Math.round(Number(vat_rate ?? 21))));
+      // VAT rate comes from the EU country presets or is typed manually — decimals like 25,5% are valid
+      const rateNum = Number(String(vat_rate ?? 21).replace(',', '.'));
+      vatRate = Number.isFinite(rateNum) ? Math.max(0, Math.min(100, rateNum)) : 21;
       const vat = Math.round(excl * vatRate / 100);
       amountCents = excl + vat;
       itemsJson = JSON.stringify(clean);
