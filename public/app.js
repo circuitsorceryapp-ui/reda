@@ -505,21 +505,9 @@ function viewDashboard(me) {
       <h1>Documents & money</h1>
       <span class="company-chip">🏢 ${esc(me.company)}</span>
     </div>
+    <div class="stat-grid" id="stats"></div>
     <div class="page-grid">
     <div class="col-main">
-    <div class="stat-grid" id="stats"></div>
-    <div class="card">
-      <h2>📷 Scan a document (optional)</h2>
-      <p class="sub">Photo, <b>PDF</b> or <b>Excel/CSV</b> — Reda reads it and fills the fields below. Files are processed <b>on your computer</b> and never uploaded anywhere. Scanning a supplier document? Choose "Purchase bill" as the type after it fills. First use needs internet (~15&nbsp;MB engine, cached afterwards).</p>
-      <input type="file" id="scanFile" accept="image/*,.pdf,.xlsx,.xls,.csv" hidden>
-      <button class="btn small secondary" id="scanBtn" type="button">📷 Scan / photo / PDF / Excel</button>
-      <span id="scanStatus" class="sub"></span>
-      <div id="scanPreview" style="display:none;margin-top:.8rem"></div>
-      <div id="scanActions" style="display:none;margin-top:.8rem;gap:.6rem;flex-wrap:wrap">
-        <button class="btn small secondary" id="scanBill" type="button">📥 This is a supplier bill — save it as Purchase bill</button>
-        <button class="btn small" id="scanSell" type="button">📤 I'm selling this — put total into my Invoice</button>
-      </div>
-    </div>
     <div class="card">
       <h2>New document</h2>
       <form id="invForm" class="form-row">
@@ -565,6 +553,18 @@ function viewDashboard(me) {
       <div id="stockBox"><p class="empty">Loading…</p></div>
     </div>
     <div class="panel-grid">
+    <div class="card">
+      <h2>📷 Scan a document (optional)</h2>
+      <p class="sub">Photo, <b>PDF</b> or <b>Excel/CSV</b> — Reda reads it and fills the form. Files are processed <b>on your computer</b> and never uploaded anywhere. First use needs internet (~15&nbsp;MB engine, cached afterwards).</p>
+      <input type="file" id="scanFile" accept="image/*,.pdf,.xlsx,.xls,.csv" hidden>
+      <button class="btn small secondary" id="scanBtn" type="button">📷 Scan / photo / PDF / Excel</button>
+      <span id="scanStatus" class="sub"></span>
+      <div id="scanPreview" style="display:none;margin-top:.8rem"></div>
+      <div id="scanActions" style="display:none;margin-top:.8rem;gap:.6rem;flex-wrap:wrap">
+        <button class="btn small secondary" id="scanBill" type="button">📥 Supplier bill</button>
+        <button class="btn small" id="scanSell" type="button">📤 I'm selling this</button>
+      </div>
+    </div>
       <div class="card"><h2>🛒 Purchase steps</h2><div id="pipeBox"><p class="empty">Loading…</p></div></div>
       <div class="card"><h2>💼 By customer</h2><p class="sub" style="margin-bottom:.5rem">Click a customer to show only their documents. Red = still owes you.</p><div id="custBox"><p class="empty">Loading…</p></div></div>
       <div class="card"><h2>💰 Unpaid — who to chase, what to pay</h2><p class="sub" style="margin-bottom:.5rem">🟡 yellow = payment due today · 🔴 red = overdue. Supplier bills = money YOU must pay — top priority.</p><div id="unpaidBox"><p class="empty">Loading…</p></div></div>
