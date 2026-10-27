@@ -23,9 +23,24 @@ Open http://localhost:3000 — create your company workspace, add invoices, set 
 | MFA: Microsoft Authenticator TOTP 6-digit codes | ✅ (RFC 6238, ±30s drift) |
 | Per-company data isolation on every query | ✅ (`tenant_id` from session, never from input) |
 | Invoices module (create, mark paid, delete, totals) | ✅ demo of a real module |
+| 📷 Invoice scanning: photo → auto-filled fields (OCR, in-browser) | ✅ prefill + human review |
 | Session management (HttpOnly cookies, 12h expiry) | ✅ |
 | User roles (owner / accountant / sales) | 🚧 field exists, enforcement TODO |
 | Contacts, purchasing, inventory, ledger, VAT | 📋 roadmap (see Architecture plan) |
+
+## Invoice scanning (photo → pre-filled form)
+
+On the dashboard, "📷 Scan / photo of invoice" lets you take a photo or pick an image of a
+supplier invoice. Reda reads it with OCR (Tesseract.js) **entirely inside your browser** —
+the image never leaves your computer — and prefills customer, amount, currency, due date
+and invoice number. **You always review and confirm before saving** — OCR is ~90-95%
+accurate on clean photos, so a human still checks every scanned invoice.
+
+Notes:
+- First use needs internet (~15 MB engine download from a CDN, cached afterwards).
+- Works best on: flat paper, good light, no shadows, text facing the camera.
+- Reads Latin+Latvian text well; the parser recognises SIA/AS/UAB/GmbH/Ltd company forms,
+  LV/LT/EE VAT numbers, "Kopā/Total"-style totals and "due/apmaksas termiņš" dates.
 
 ## How isolation works (the important part)
 

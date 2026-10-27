@@ -94,7 +94,7 @@ async function handleApi(req, res, url) {
       const tenant = db.prepare('INSERT INTO tenants (name) VALUES (?)').run(companyName);
       const user = db.prepare(
         'INSERT INTO users (tenant_id, name, email, password_hash, role) VALUES (?, ?, ?, ?, ?)'
-      ).run(tenant.lastInsertRowid, name, email.toLowerCase(), hashPassword(password), 'owner');
+      ).run(tenant.lastInsertRowid, name.trim(), email.trim().toLowerCase(), hashPassword(password), 'owner');
       db.exec('COMMIT');
       const sid = setSession(user.lastInsertRowid, false);
       res.setHeader('Set-Cookie', cookie(sid));
@@ -107,7 +107,7 @@ async function handleApi(req, res, url) {
 
   if (req.method === 'POST' && url.pathname === '/api/login') {
     const { email, password } = body || {};
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(String(email || '').toLowerCase());
+    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(String(email || '').trim().toLowerCase());
     if (!user || !verifyPassword(String(password || ''), user.password_hash))
       return bad(res, 'Wrong email or password', 401);
 
@@ -123,7 +123,8 @@ async function handleApi(req, res, url) {
     const { code } = body || {};
     const full = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
     if (!verifyTotp(full.totp_secret, code)) return bad(res, 'Invalid or expired code', 401);
-    db.prepare('UPDATE sessions SET mfa_pending = 0 WHERE user_id = ?').run(user.id);
+    // unlock ONLY the session that entered the code, not all sessions of the user
+    db.prepare('UPDATE sessions SET mfa_pending = 0 WHERE id = ?').get(getCookie(req, 'reda_session'));
     return json(res, 200, { ok: true });
   }
 
@@ -146,6 +147,7 @@ async function handleApi(req, res, url) {
   // ---- MFA setup (Microsoft Authenticator) ----
   if (req.method === 'POST' && url.pathname === '/api/mfa/setup') {
     const user = requireAuth(req, res); if (!user) return;
+    if (user.totp_enabled) return bad(res, 'MFA is already enabled — disable it first if you want to change it', 409);
     const secret = generateTotpSecret();
     db.prepare('UPDATE users SET totp_secret = ? WHERE id = ?').run(secret, user.id);
     return json(res, 200, { secret, uri: otpauthUri(secret, user.email) });
@@ -194,7 +196,11 @@ async function handleApi(req, res, url) {
     const amountCents = Math.round(Number(amount) * 100);
     if (!Number.isFinite(amountCents) || amountCents <= 0) return bad(res, 'Amount must be a positive number');
 
-    const n = db.prepare('SELECT COUNT(*) AS c FROM invoices WHERE tenant_id = ?').get(user.tenant_id).c + 1;
+    // next number = highest existing suffix + 1 (never re-uses a number after deletions)
+    const n = db.prepare(
+      `SELECT COALESCE(MAX(CAST(SUBSTR(number, 5) AS INTEGER)), 0) + 1 AS next
+       FROM invoices WHERE tenant_id = ?`
+    ).get(user.tenant_id).next;
     const number = `INV-${String(n).padStart(4, '0')}`;
     db.prepare(
       `INSERT INTO invoices (tenant_id, number, customer, description, amount_cents, currency, issue_date, due_date, status)

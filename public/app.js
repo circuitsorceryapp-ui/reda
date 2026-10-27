@@ -15,6 +15,115 @@ async function api(path, method = 'GET', body) {
 const fmt = (cents, cur) => new Intl.NumberFormat('en', { style: 'currency', currency: cur || 'EUR' }).format(cents / 100);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// ---------- invoice scanning (OCR runs in the browser; the image never leaves your PC) ----------
+let tesseractLoading = null;
+function loadTesseract() {
+  if (window.Tesseract) return Promise.resolve();
+  if (tesseractLoading) return tesseractLoading;
+  tesseractLoading = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Could not load the OCR engine — internet needed the first time'));
+    document.head.appendChild(s);
+  });
+  return tesseractLoading;
+}
+
+// Turns raw OCR text into form fields. Pure function — deliberately overridable by a human review.
+function parseInvoiceText(rawText) {
+  const lines = String(rawText).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const text = lines.join('\n');
+
+  // --- dates first: dd.mm.yyyy / dd/mm/yyyy / yyyy-mm-dd, also 2-digit years ---
+  const dates = [];
+  const dateRe = /\b(\d{4})-(\d{1,2})-(\d{1,2})\b|\b(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})\b/g;
+  let d;
+  const dateSpans = [];
+  while ((d = dateRe.exec(text)) !== null) {
+    let y, mo, dd;
+    if (d[1]) { y = +d[1]; mo = +d[2]; dd = +d[3]; }
+    else { dd = +d[4]; mo = +d[5]; y = +d[6]; if (y < 100) y += 2000; }
+    if (mo >= 1 && mo <= 12 && dd >= 1 && dd <= 31) {
+      dates.push({ iso: `${y}-${String(mo).padStart(2, '0')}-${String(dd).padStart(2, '0')}` });
+      dateSpans.push([d.index, d.index + d[0].length]);
+    }
+  }
+  // amount hunting happens on text with dates blanked out, so "27.10.2026" can never become "27.10 €"
+  const amountText = dateSpans.reduceRight((s, [from, to]) => s.slice(0, from) + ' '.repeat(to - from) + s.slice(to), text);
+
+  // --- amounts: any money-format number with 2 decimals ---
+  const amountMatches = [];
+  const amountRe = /(?:€|EUR|USD|GBP|\$|£)?\s*([0-9][0-9 \u00A0.,]*[.,][0-9]{2})(?:\s*(?:€|EUR|USD|GBP|\$|£))?/g;
+  let m;
+  while ((m = amountRe.exec(amountText)) !== null) {
+    const digits = m[1].replace(/[ \u00A0]/g, '');
+    const lastSep = Math.max(digits.lastIndexOf(','), digits.lastIndexOf('.'));
+    const value = parseFloat(digits.slice(0, lastSep).replace(/[.,]/g, '') + '.' + digits.slice(lastSep + 1));
+    if (Number.isFinite(value)) {
+      const ctx = amountText.slice(Math.max(0, m.index - 60), m.index);
+      const isTotal = /total|kop[āa]|summa|visa|gross|maks[āa]t|apmaks/i.test(ctx);
+      amountMatches.push({ value, ctx, isTotal });
+    }
+  }
+  // prefer amounts near "total"-like words, then the largest amount
+  amountMatches.sort((a, b) => (b.isTotal - a.isTotal) || (b.value - a.value));
+  const amount = amountMatches.length ? amountMatches[0] : null;
+
+  // --- currency: what symbol/code appears around the amounts ---
+  let currency = 'EUR';
+  const hasEuro = /€|\bEUR\b/i.test(text);
+  const hasUsd = /\$|\bUSD\b/i.test(text);
+  const hasGbp = /£|\bGBP\b/i.test(text);
+  if (!hasEuro && hasUsd) currency = 'USD';
+  else if (!hasEuro && hasGbp) currency = 'GBP';
+
+  // due date = date near "due/apmaksas līdz"-like words; otherwise the latest date found
+  let due_date = null;
+  for (const line of lines) {
+    if (/due|apmaks|līdz|maks[āa]juma|termi[nņ]|pay by/i.test(line)) {
+      const dm = line.match(dateRe);
+      if (dm) { const inLine = parseFirstDateIn(line); if (inLine) { due_date = inLine; break; } }
+    }
+  }
+  if (!due_date && dates.length) due_date = dates[dates.length - 1].iso;
+
+  // --- invoice number ---
+  let invoiceNo = null;
+  const noRe = /\b(?:r[ēe][ķk]in[sa]|rekins|reknis|invoice|saskaita|ček|cek|nr|no|#)[\s.:\-]*([A-Z0-9\-\/]*[0-9][A-Z0-9\-\/]*)/i;
+  for (const line of lines) { const n = line.match(noRe); if (n) { invoiceNo = n[1]; break; } }
+
+  // --- counterparty: line with a company form (SIA, AS, UAB, GmbH...) ---
+  let customer = null;
+  for (const line of lines) {
+    const c = line.match(/\b(SIA|A\/S|AS|S\.A\.|UAB|O[ÜU]|GmbH|MB|Ltd|Limited|LLC|Inc|K\/S|PS|IK|IP|SC)\b/i);
+    if (c && line.length < 80) { customer = line.replace(/[.,;:]+$/, '').trim(); break; }
+  }
+
+  // --- VAT number (adds trust context) ---
+  const vat = text.match(/\b((?:LV|LT|EE|SE|DE|PL|FI|DK|NL|FR)[\s-]?\d{9,12})\b/i);
+
+  return {
+    customer: customer ? customer.slice(0, 80) : null,
+    amount: amount ? amount.value.toFixed(2) : null,
+    currency,
+    due_date,
+    invoiceNo,
+    vat: vat ? vat[1] : null,
+    rawAmountCount: amountMatches.length,
+  };
+}
+
+function parseFirstDateIn(line) {
+  const d = line.match(/(\d{4})-(\d{1,2})-(\d{1,2})|(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})/);
+  if (!d) return null;
+  let y, mo, dd;
+  if (d[1]) { y = +d[1]; mo = +d[2]; dd = +d[3]; }
+  else { dd = +d[4]; mo = +d[5]; y = +d[6]; if (y < 100) y += 2000; }
+  if (mo < 1 || mo > 12 || dd < 1 || dd > 31) return null;
+  return `${y}-${String(mo).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+}
+
 // ---------------- router ----------------
 async function route() {
   const hash = location.hash || '#/login';
@@ -58,6 +167,7 @@ function viewLogin(msg = '') {
       });
       location.hash = r.mfaRequired ? '#/mfa' : '#/dashboard';
       if (r.mfaRequired) viewMfaPrompt();
+      else route(); // if hash didn't change, hashchange won't fire — render manually
     } catch (err) { showError(err.message); }
   };
 }
@@ -79,8 +189,10 @@ function viewRegister() {
     e.preventDefault();
     try {
       await api('/api/register', 'POST', {
-        companyName: companyName.value, name: name.value,
-        email: email.value, password: password.value,
+        companyName: document.getElementById('companyName').value,
+        name: document.getElementById('name').value,
+        email: document.getElementById('email').value,
+        password: document.getElementById('password').value,
       });
       location.hash = '#/mfa-setup';
       viewMfaSetup();
@@ -170,6 +282,13 @@ function viewDashboard(me) {
     </div>
     <div class="stat-grid" id="stats"></div>
     <div class="card">
+      <h2>📷 Scan a supplier invoice (optional)</h2>
+      <p class="sub">Take a photo or choose an image — Reda reads it and fills the fields below. The image is processed <b>on your computer</b> and never uploaded anywhere. First use needs internet to fetch the reading engine (~15&nbsp;MB, cached afterwards).</p>
+      <input type="file" id="scanFile" accept="image/*" capture="environment" hidden>
+      <button class="btn small secondary" id="scanBtn" type="button">📷 Scan / photo of invoice</button>
+      <span id="scanStatus" class="sub"></span>
+    </div>
+    <div class="card">
       <h2>New invoice</h2>
       <form id="invForm" class="form-row">
         <div><label>Customer</label><input id="customer" required placeholder="SIA Example"></div>
@@ -218,6 +337,41 @@ function viewDashboard(me) {
       }
     });
   }
+  document.getElementById('scanBtn').onclick = () => document.getElementById('scanFile').click();
+  document.getElementById('scanFile').onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const status = document.getElementById('scanStatus');
+    e.target.value = '';
+    try {
+      status.textContent = 'Loading reading engine…';
+      await loadTesseract();
+      status.textContent = 'Reading invoice… (this takes ~5–20 seconds)';
+      const result = await Tesseract.recognize(file, 'eng', {
+        logger: (l) => { if (l.status === 'recognizing text') status.textContent = `Reading invoice… ${Math.round(l.progress * 100)}%`; },
+      });
+      const parsed = parseInvoiceText(result.data.text);
+      // prefill the form — the human always reviews before saving
+      if (parsed.customer) document.getElementById('customer').value = parsed.customer;
+      if (parsed.amount) document.getElementById('amount').value = parsed.amount;
+      document.getElementById('currency').value = parsed.currency;
+      if (parsed.due_date) document.getElementById('due_date').value = parsed.due_date;
+      const parts = [];
+      if (parsed.invoiceNo) parts.push(`Invoice ${parsed.invoiceNo}`);
+      if (parsed.vat) parts.push(`VAT ${parsed.vat}`);
+      if (parsed.amount) parts.push(`Detected total: ${parsed.amount} ${parsed.currency}`);
+      document.getElementById('description').value = parts.length
+        ? `${parts.join(', ')} (scanned — please check)`
+        : '';
+      const found = ['customer', 'amount', 'due_date', 'invoiceNo'].filter((k) => parsed[k]).length;
+      status.textContent = found
+        ? `✅ Filled ${found} of 4 fields — please check & correct them, then press "Add invoice".`
+        : '⚠️ Could not read the fields reliably — try a sharper photo with better light, or fill in manually.';
+    } catch (err) {
+      status.textContent = `⚠️ ${err.message}`;
+    }
+  };
+
   document.getElementById('invForm').onsubmit = async (e) => {
     e.preventDefault();
     try {
