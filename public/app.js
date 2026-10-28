@@ -1,1572 +1,966 @@
-// Reda frontend — vanilla JS single-page app
-const $app = document.getElementById('app');
-
-async function api(path, method = 'GET', body) {
-  const res = await fetch(path, {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || 'Request failed');
-  return data;
-}
-
-const fmt = (cents, cur) => new Intl.NumberFormat('en', { style: 'currency', currency: cur || 'EUR' }).format(cents / 100);
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-
-// EU VAT rates 2026 (standard + reduced, per national law). Presets only — you can always type a custom rate,
-// because countries change rates during the year and some goods (wood, medicine, books…) have their own rate.
-const EU_VAT = {
-  LV: { name: '🇱🇻 Latvia', rates: [21, 12, 5, 0] },
-  LT: { name: '🇱🇹 Lithuania', rates: [21, 12, 9, 0] },
-  EE: { name: '🇪🇪 Estonia', rates: [24, 13, 9, 0] },
-  FI: { name: '🇫🇮 Finland', rates: [25.5, 14, 13.5, 10, 0] },
-  SE: { name: '🇸🇪 Sweden', rates: [25, 12, 6, 0] },
-  DK: { name: '🇩🇰 Denmark', rates: [25, 0] },
-  DE: { name: '🇩🇪 Germany', rates: [19, 7, 0] },
-  PL: { name: '🇵🇱 Poland', rates: [23, 8, 5, 0] },
-  AT: { name: '🇦🇹 Austria', rates: [20, 13, 10, 0] },
-  BE: { name: '🇧🇪 Belgium', rates: [21, 12, 6, 0] },
-  NL: { name: '🇳🇱 Netherlands', rates: [21, 9, 0] },
-  LU: { name: '🇱🇺 Luxembourg', rates: [17, 14, 8, 3, 0] },
-  FR: { name: '🇫🇷 France', rates: [20, 10, 5.5, 2.1, 0] },
-  IT: { name: '🇮🇹 Italy', rates: [22, 10, 5, 4, 0] },
-  ES: { name: '🇪🇸 Spain', rates: [21, 10, 4, 0] },
-  PT: { name: '🇵🇹 Portugal', rates: [23, 13, 6, 0] },
-  IE: { name: '🇮🇪 Ireland', rates: [23, 13.5, 9, 4.8, 0] },
-  CZ: { name: '🇨🇿 Czechia', rates: [21, 12, 0] },
-  SK: { name: '🇸🇰 Slovakia', rates: [23, 19, 5, 0] },
-  HU: { name: '🇭🇺 Hungary', rates: [27, 18, 5, 0] },
-  RO: { name: '🇷🇴 Romania', rates: [21, 11, 9, 5, 0] },
-  BG: { name: '🇧🇬 Bulgaria', rates: [20, 9, 0] },
-  HR: { name: '🇭🇷 Croatia', rates: [25, 13, 5, 0] },
-  SI: { name: '🇸🇮 Slovenia', rates: [22, 9.5, 5, 0] },
-  GR: { name: '🇬🇷 Greece', rates: [24, 13, 6, 0] },
-  CY: { name: '🇨🇾 Cyprus', rates: [19, 9, 5, 0] },
-  MT: { name: '🇲🇹 Malta', rates: [18, 7, 5, 0] },
-};
-
-
-// ---------- invoice scanning (OCR runs in the browser; the image never leaves your PC) ----------
-let tesseractLoading = null;
-function loadTesseract() {
-  if (window.Tesseract) return Promise.resolve();
-  if (tesseractLoading) return tesseractLoading;
-  tesseractLoading = new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
-    s.onload = resolve;
-    s.onerror = () => reject(new Error('Could not load the OCR engine — internet needed the first time'));
-    document.head.appendChild(s);
-  });
-  return tesseractLoading;
-}
-
-let pdfjsLoading = null;
-function loadPdfJs() {
-  if (window.pdfjsLib) return Promise.resolve();
-  if (pdfjsLoading) return pdfjsLoading;
-  pdfjsLoading = new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js';
-    s.onload = () => {
-      window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-        'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
-      resolve();
-    };
-    s.onerror = () => reject(new Error('Could not load the PDF reader'));
-    document.head.appendChild(s);
-  });
-  return pdfjsLoading;
-}
-
-let xlsxLoading = null;
-function loadXlsx() {
-  if (window.XLSX) return Promise.resolve();
-  if (xlsxLoading) return xlsxLoading;
-  xlsxLoading = new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = 'https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js';
-    s.onload = resolve;
-    s.onerror = () => reject(new Error('Could not load the Excel reader'));
-    document.head.appendChild(s);
-  });
-  return xlsxLoading;
-}
-
-// Extracts raw text from an uploaded file: photo (OCR), PDF (render + OCR) or Excel/CSV (direct — exact values, no OCR)
-async function fileToInvoiceText(file, onStatus) {
-  const name = (file.name || '').toLowerCase();
-  const readDataUrl = () => new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(r.result);
-    r.onerror = reject;
-    r.readAsDataURL(file);
-  });
-  if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
-    onStatus('Reading spreadsheet…');
-    await loadXlsx();
-    const buf = await file.arrayBuffer();
-    const wb = XLSX.read(buf, { type: 'array' });
-    const text = wb.SheetNames.map((n) => XLSX.utils.sheet_to_csv(wb.Sheets[n])).join('\n');
-    return { text, kind: 'spreadsheet', preview: null };
-  }
-  if (name.endsWith('.pdf') || file.type === 'application/pdf') {
-    onStatus('Opening PDF…');
-    await loadPdfJs();
-    await loadTesseract();
-    const buf = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-    let text = '';
-    let preview = null;
-    const pages = Math.min(pdf.numPages, 3); // first 3 pages is enough for an invoice
-    for (let p = 1; p <= pages; p++) {
-      onStatus(`Reading PDF page ${p} of ${pages}…`);
-      const page = await pdf.getPage(p);
-      const viewport = page.getViewport({ scale: 2 });
-      const canvas = document.createElement('canvas');
-      canvas.width = viewport.width; canvas.height = viewport.height;
-      await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-      if (p === 1) { // keep page 1 as the visual preview of the original
-        const small = document.createElement('canvas');
-        const v2 = page.getViewport({ scale: 1.2 });
-        small.width = v2.width; small.height = v2.height;
-        await page.render({ canvasContext: small.getContext('2d'), viewport: v2 }).promise;
-        preview = small.toDataURL('image/jpeg', 0.75);
-      }
-      const r = await Tesseract.recognize(canvas, 'eng');
-      text += r.data.text + '\n';
-    }
-    return { text, kind: 'pdf', preview };
-  }
-  onStatus('Loading reading engine…');
-  await loadTesseract();
-  const preview = await readDataUrl(); // the original photo IS the preview
-  onStatus('Reading document… (this takes ~5–20 seconds)');
-  const r = await Tesseract.recognize(file, 'eng', {
-    logger: (l) => { if (l.status === 'recognizing text') onStatus(`Reading document… ${Math.round(l.progress * 100)}%`); },
-  });
-  return { text: r.data.text, kind: 'image', preview };
-}
-
-// Turns raw OCR text into form fields. Pure function — deliberately overridable by a human review.
-function parseInvoiceText(rawText) {
-  const lines = String(rawText).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  const text = lines.join('\n');
-
-  // --- dates first: dd.mm.yyyy / dd/mm/yyyy / yyyy-mm-dd, also 2-digit years ---
-  const dates = [];
-  const dateRe = /\b(\d{4})-(\d{1,2})-(\d{1,2})\b|\b(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})\b/g;
-  let d;
-  const dateSpans = [];
-  while ((d = dateRe.exec(text)) !== null) {
-    let y, mo, dd;
-    if (d[1]) { y = +d[1]; mo = +d[2]; dd = +d[3]; }
-    else { dd = +d[4]; mo = +d[5]; y = +d[6]; if (y < 100) y += 2000; }
-    if (mo >= 1 && mo <= 12 && dd >= 1 && dd <= 31) {
-      dates.push({ iso: `${y}-${String(mo).padStart(2, '0')}-${String(dd).padStart(2, '0')}` });
-      dateSpans.push([d.index, d.index + d[0].length]);
-    }
-  }
-  // amount hunting happens on text with dates blanked out, so "27.10.2026" can never become "27.10 €"
-  const amountText = dateSpans.reduceRight((s, [from, to]) => s.slice(0, from) + ' '.repeat(to - from) + s.slice(to), text);
-
-  // --- amounts: any money-format number with 2 decimals ---
-  const amountMatches = [];
-  const amountRe = /(?:€|EUR|USD|GBP|\$|£)?\s*([0-9][0-9 \u00A0.,]*[.,][0-9]{2})(?:\s*(?:€|EUR|USD|GBP|\$|£))?/g;
-  let m;
-  while ((m = amountRe.exec(amountText)) !== null) {
-    const digits = m[1].replace(/[ \u00A0]/g, '');
-    const lastSep = Math.max(digits.lastIndexOf(','), digits.lastIndexOf('.'));
-    const value = parseFloat(digits.slice(0, lastSep).replace(/[.,]/g, '') + '.' + digits.slice(lastSep + 1));
-    if (Number.isFinite(value)) {
-      const ctx = amountText.slice(Math.max(0, m.index - 60), m.index);
-      const isTotal = /total|kop[āa]|summa|visa|gross|maks[āa]t|apmaks/i.test(ctx);
-      amountMatches.push({ value, ctx, isTotal });
-    }
-  }
-  // prefer amounts near "total"-like words, then the largest amount
-  amountMatches.sort((a, b) => (b.isTotal - a.isTotal) || (b.value - a.value));
-  const amount = amountMatches.length ? amountMatches[0] : null;
-
-  // --- currency: what symbol/code appears around the amounts ---
-  let currency = 'EUR';
-  const hasEuro = /€|\bEUR\b/i.test(text);
-  const hasUsd = /\$|\bUSD\b/i.test(text);
-  const hasGbp = /£|\bGBP\b/i.test(text);
-  if (!hasEuro && hasUsd) currency = 'USD';
-  else if (!hasEuro && hasGbp) currency = 'GBP';
-
-  // due date = date near "due/apmaksas līdz"-like words; otherwise the latest date found
-  let due_date = null;
-  for (const line of lines) {
-    if (/due|apmaks|līdz|maks[āa]juma|termi[nņ]|pay by/i.test(line)) {
-      const dm = line.match(dateRe);
-      if (dm) { const inLine = parseFirstDateIn(line); if (inLine) { due_date = inLine; break; } }
-    }
-  }
-  if (!due_date && dates.length) due_date = dates[dates.length - 1].iso;
-
-  // --- invoice number ---
-  let invoiceNo = null;
-  const noRe = /\b(?:r[ēe][ķk]in[sa]|rekins|reknis|invoice|saskaita|ček|cek|nr|no|#)[\s.:#\-]*([A-Z0-9\-\/]*[0-9][A-Z0-9\-\/]*)/i;
-  for (const line of lines) { const n = line.match(noRe); if (n) { invoiceNo = n[1]; break; } }
-
-  // --- counterparty: line with a company form (SIA, AS, UAB, GmbH...) ---
-  let customer = null;
-  let regNo = null;
-  for (const line of lines) {
-    if (/^(r[ēe][ķk]in[sa]|rekins|reknis|fakt[ūu]ra|invoice|saskaita|[čc]ek[s]?|nr|no|#)/i.test(line)) continue; // "Invoice #AB-77" is a number, not a company
-    const c = line.match(/\b(SIA|A\/S|S\.A\.|AS|UAB|O[ÜU]|GmbH|MB|Ltd|Limited|LLC|Llc|Inc|Corp|Co\.|OY|AB|BV|NV|Sp\.A\.|Zrt|d\.o\.o\.|s\.r\.o\.|K\/S|PS|IK|IP|SC)(?!-\d)/);
-    if (c && line.length < 80) {
-      let name = line;
-      // strip Latvian / English "sender/buyer" labels and list numbers: "01. Nosūtītājs:", "Piegādātājs:", "From:", "3)" …
-      name = name
-        .replace(/^\s*\d{1,2}\s*[.\)\-–]\s*/, '')
-        .replace(/^(pre[cč]u\s+)?(nos[ūu]t[īi]t[āa]js|nosutitajs|pieg[āa]d[āa]t[āa]js|s[ūu]t[īi]t[āa]js|sa[ņn][ēe]m[ēe]js|sanemejs|klients?|klientam|pirc[ēe]js|buyer|bill to|sold to|from|supplier|vendor|customer)\s*[:\-–]?\s*/i, '')
-        .replace(/["'„“”]+/g, '')
-        .trim();
-      // cut the name off at the first registration/VAT/extra-info part: keep a clean company name only
-      const cut = name.split(/\s+(?=(?:re[ğģg]\.?\s*nr|reg\.?\s*nr|re[ğģg]istr[āa]cijas|PVN|VAT|HRB|Invoice|Saskaita|R[ēe][ķk]ins)\b|\b[A-Z]{2,5}\d{4,}\b)/i)[0];
-      if (cut.trim()) name = cut.trim();
-      const rn = line.match(/\b(?:re[ğģg]\.?\s*nr|reg\.?\s*nr|re[ğģg]istr[āa]cijas\s*nr)\s*[:.]?\s*([A-Z]{0,3}[0-9]{6,15})/i);
-      if (rn) regNo = rn[1];
-      customer = name.slice(0, 80);
-      break;
-    }
-  }
-
-  // --- VAT number (adds trust context) ---
-  const vat = text.match(/\b((?:LV|LT|EE|SE|DE|PL|FI|DK|NL|FR)[\s-]?\d{9,12})\b/i);
-
-  return {
-    customer: customer ? customer.slice(0, 80) : null,
-    amount: amount ? amount.value.toFixed(2) : null,
-    currency,
-    due_date,
-    invoiceNo,
-    vat: vat ? vat[1] : null,
-    reg_no: regNo,
-    rawAmountCount: amountMatches.length,
-  };
-}
-
-function parseFirstDateIn(line) {
-  const d = line.match(/(\d{4})-(\d{1,2})-(\d{1,2})|(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})/);
-  if (!d) return null;
-  let y, mo, dd;
-  if (d[1]) { y = +d[1]; mo = +d[2]; dd = +d[3]; }
-  else { dd = +d[4]; mo = +d[5]; y = +d[6]; if (y < 100) y += 2000; }
-  if (mo < 1 || mo > 12 || dd < 1 || dd > 31) return null;
-  return `${y}-${String(mo).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
-}
-
-// ---------------- router ----------------
-async function route() {
-  const hash = location.hash || '#/login';
-  const me = await api('/api/me').catch(() => null);
-  if (me) {
-    if (hash === '#/login' || hash === '#/register') return location.hash = '#/dashboard';
-    if (hash === '#/settings') return viewSettings(me);
-    if (hash === '#/scans') return viewScans(me);
-    if (hash === '#/contacts') return viewContacts(me);
-    return viewDashboard(me);
-  }
-  if (hash === '#/register') return viewRegister();
-  if (me === null && hash.startsWith('#/dashboard')) return viewLogin();
-  viewLogin();
-}
-window.addEventListener('hashchange', route);
-
-// ---------------- views ----------------
-function authShell(inner) {
-  $app.innerHTML = `
-  <div class="auth-wrap"><div class="auth-card">
-    <div class="brand"><div class="logo">R</div><span>Reda</span></div>
-    <div class="sub">Lite ERP for small business</div>
-    ${inner}
-  </div></div>`;
-}
-
-function viewLogin(msg = '') {
-  authShell(`
-    <h1>Welcome back</h1>
-    <div class="error-msg" id="err">${esc(msg)}</div>
-    <form id="loginForm">
-      <label>Email</label><input id="email" type="email" required autocomplete="email">
-      <label>Password</label><input id="password" type="password" required autocomplete="current-password">
-      <button class="btn" type="submit">Log in</button>
-    </form>
-    <div class="foot-note">No account yet? <a href="#/register">Create your company workspace</a></div>`);
-  document.getElementById('loginForm').onsubmit = async (e) => {
-    e.preventDefault();
-    try {
-      const r = await api('/api/login', 'POST', {
-        email: email.value, password: password.value,
-      });
-      location.hash = r.mfaRequired ? '#/mfa' : '#/dashboard';
-      if (r.mfaRequired) viewMfaPrompt();
-      else route(); // if hash didn't change, hashchange won't fire — render manually
-    } catch (err) { showError(err.message); }
-  };
-}
-
-function viewRegister() {
-  authShell(`
-    <h1>Create your workspace</h1>
-    <p class="sub">Your company gets its own private space — no other company can ever see your data.</p>
-    <div class="error-msg" id="err"></div>
-    <form id="regForm">
-      <label>Company name</label><input id="companyName" required>
-      <label>Your name</label><input id="name" required>
-      <label>Email</label><input id="email" type="email" required autocomplete="email">
-      <label>Password (min 8 characters)</label><input id="password" type="password" required minlength="8" autocomplete="new-password">
-      <button class="btn" type="submit">Create workspace</button>
-    </form>
-    <div class="foot-note">Already have an account? <a href="#/login">Log in</a></div>`);
-  document.getElementById('regForm').onsubmit = async (e) => {
-    e.preventDefault();
-    try {
-      await api('/api/register', 'POST', {
-        companyName: document.getElementById('companyName').value,
-        name: document.getElementById('name').value,
-        email: document.getElementById('email').value,
-        password: document.getElementById('password').value,
-      });
-      location.hash = '#/mfa-setup';
-      viewMfaSetup();
-    } catch (err) { showError(err.message); }
-  };
-}
-
-function viewMfaPrompt() {
-  authShell(`
-    <h1>Two-step verification</h1>
-    <p class="sub">Open Microsoft Authenticator and enter the 6-digit code for your account.</p>
-    <div class="error-msg" id="err"></div>
-    <form id="mfaForm">
-      <label>Authenticator code</label>
-      <input id="code" inputmode="numeric" pattern="[0-9]*" maxlength="6" required autofocus autocomplete="one-time-code">
-      <button class="btn" type="submit">Verify</button>
-    </form>`);
-  document.getElementById('mfaForm').onsubmit = async (e) => {
-    e.preventDefault();
-    try {
-      await api('/api/login/mfa', 'POST', { code: code.value });
-      location.hash = '#/dashboard';
-      route();
-    } catch (err) { showError(err.message); }
-  };
-}
-
-function viewMfaSetup() {
-  authShell(`
-    <h1>Protect your account</h1>
-    <p class="sub">Set up Microsoft Authenticator now — your books deserve more than just a password.</p>
-    <div class="error-msg" id="err"></div>
-    <div id="setupBody"><p class="steps">Generating your secret…</p></div>
-    <a class="foot-note" href="#/dashboard">Skip for now (you can do this in Settings)</a>`);
-  (async () => {
-    const { secret } = await api('/api/mfa/setup', 'POST');
-    document.getElementById('setupBody').innerHTML = `
-      <p class="steps"><b>1.</b> Open Microsoft Authenticator → <b>Add account</b> → <b>Other account</b><br>
-      <b>2.</b> Choose <b>Enter code manually</b><br>
-      <b>3.</b> Account name: <b>${esc(secret.account || 'Reda')}</b> — use any name you like<br>
-      <b>4.</b> Secret key (type it in, or copy):</p>
-      <div class="secret-box" id="secret">${esc(secret)}</div>
-      <p class="steps"><b>5.</b> Enter the 6-digit code the app shows to confirm:</p>
-      <form id="enableForm">
-        <input id="code" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="6-digit code" required>
-        <button class="btn" type="submit">Confirm & activate</button>
-      </form>`;
-    document.getElementById('enableForm').onsubmit = async (e) => {
-      e.preventDefault();
-      try {
-        await api('/api/mfa/enable', 'POST', { code: code.value });
-        location.hash = '#/dashboard';
-        route();
-      } catch (err) { showError(err.message); }
-    };
-  })().catch((e) => showError(e.message));
-}
-
-function appShell(me, active, content) {
-  $app.innerHTML = `
-  <div class="layout">
-    <aside class="sidebar">
-      <div class="brand"><div class="logo">R</div><span>Reda</span></div>
-      <nav>
-        <a href="#/dashboard" class="${active === 'dashboard' ? 'active' : ''}">📊 Invoices</a>
-        <a href="#/contacts" class="${active === 'contacts' ? 'active' : ''}">👥 Customers & suppliers</a>
-        <a href="#/settings" class="${active === 'settings' ? 'active' : ''}">⚙️ Settings</a>
-        <a href="#/scans" class="${active === 'scans' ? 'active' : ''}">📎 Scanned originals</a>
-      </nav>
-      <div class="spacer"></div>
-      <div class="userbox"><b>${esc(me.name)}</b>${esc(me.role)}<br>${esc(me.email)}</div>
-      <nav><a href="#" id="logout">Log out</a></nav>
-    </aside>
-    <main class="main">${content}</main>
-  </div>`;
-  document.getElementById('logout').onclick = async (e) => {
-    e.preventDefault();
-    await api('/api/logout', 'POST');
-    location.hash = '#/login';
-    viewLogin();
-  };
-}
-
-// ---------- printable PDF: opens a clean A4 layout the browser can print or save as PDF ----------
-async function printDoc(me, d) {
-  // company profile (details + logo) from Settings — appears on the letterhead
-  let co = null;
-  try { co = await api('/api/company'); } catch { co = null; }
-  // banking v9.4: the bank account chosen on the document (or the first/default one)
-  const banks = (co && Array.isArray(co.banks)) ? co.banks : [];
-  const bank = banks.length ? banks[(d.bank_id && banks[d.bank_id - 1]) ? d.bank_id - 1 : 0] : null;
-  const bankLine = bank ? `Bank: ${[bank.name, bank.iban, bank.swift].filter(Boolean).join(' · ')}` : (co && co.bank ? `Bank: ${co.bank}` : '');
-  const coLines = co ? [co.address, co.reg_no ? `Reg. no. ${co.reg_no}` : '',
-    co.vat_no ? `VAT no. ${co.vat_no}` : '', bankLine,
-    co.phone, co.email].filter(Boolean) : [];
-  const TITLES = { quote: 'OFFER / QUOTE', delivery: 'DELIVERY NOTE', invoice: 'INVOICE', bill: 'PURCHASE BILL' };
-  const paid = (d.paid_cents || 0) / 100;
-  const remaining = (d.amount_cents - (d.paid_cents || 0)) / 100;
-  const today = new Date().toLocaleDateString('en-GB');
-  const hasItems = Array.isArray(d.items) && d.items.length > 0;
-  const rowsHtml = hasItems ? d.items.map((it, i) => `
-    <tr><td>${i + 1}</td><td>${esc(it.code || '')}</td><td>${esc(it.name)}</td><td>${esc(it.tax_code || '')}</td>
-    <td class="amount">${Number(it.qty)}</td>
-    <td class="amount">${fmt(it.unit_price_cents, d.currency)}</td>
-    <td class="amount">${fmt(Math.round(Number(it.qty) * it.unit_price_cents), d.currency)}</td></tr>`).join('') : `
-    <tr><td>1</td><td></td><td>${esc(d.description || 'As agreed')}</td><td></td>
-    <td class="amount">1</td><td class="amount"></td><td class="amount">${fmt(d.amount_cents, d.currency)}</td></tr>`;
-  const vatRows = hasItems ? `
-    <tr><td>Sum without VAT</td><td class="amount">${fmt(d.total_excl_cents, d.currency)}</td></tr>
-    <tr><td>VAT ${d.vat_rate}%</td><td class="amount">${fmt(d.vat_cents, d.currency)}</td></tr>` : '';
-  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${TITLES[d.doc_type]} ${esc(d.number)}</title>
-<style>
-  @page { size: A4; margin: 18mm 16mm; }
-  body { font-family: Arial, Helvetica, sans-serif; color: #1c2733; font-size: 11pt; }
-  .head { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #0b5cad; padding-bottom: 10px; gap: 20px; }
-  .head img.logo { max-height: 56px; max-width: 180px; }
-  .company-wrap { display: flex; align-items: center; gap: 12px; }
-  .company { font-size: 15pt; font-weight: bold; color: #0b5cad; }
-  .company-details { color: #64748b; font-size: 8.5pt; margin-top: 3px; line-height: 1.5; }
-  .doctype { text-align: right; }
-  .doctype h1 { margin: 0; font-size: 20pt; letter-spacing: 2px; color: #1c2733; }
-  .doctype .num { color: #64748b; font-size: 10pt; margin-top: 4px; }
-  .parties { display: flex; justify-content: space-between; margin: 22px 0; }
-  .party { width: 46%; }
-  .party h3 { margin: 0 0 6px; font-size: 9pt; text-transform: uppercase; color: #64748b; letter-spacing: 1px; }
-  table.items { width: 100%; border-collapse: collapse; margin-top: 10px; }
-  table.items th { text-align: left; border-bottom: 2px solid #1c2733; padding: 7px 8px; font-size: 9pt; text-transform: uppercase; color: #64748b; }
-  table.items td { border-bottom: 1px solid #dde3ea; padding: 9px 8px; }
-  .amount { text-align: right; white-space: nowrap; }
-  .totals { margin-left: auto; width: 300px; margin-top: 14px; }
-  .totals td { padding: 5px 8px; }
-  .totals .grand { border-top: 2px solid #1c2733; font-weight: bold; font-size: 12pt; }
-  .totals .red { color: #c0392b; } .totals .green { color: #0f8a4d; }
-  .meta { margin: 14px 0 0; font-size: 10pt; color: #334155; }
-  .meta b { color: #1c2733; }
-  .foot { margin-top: 40px; padding-top: 10px; border-top: 1px solid #dde3ea; font-size: 8.5pt; color: #94a3b8; display: flex; justify-content: space-between; }
-  .status { display: inline-block; padding: 3px 12px; border: 1px solid; border-radius: 999px; font-size: 9pt; font-weight: bold; text-transform: uppercase; }
-</style></head><body>
-  <div class="head">
-    <div>
-      <div class="company-wrap">
-        ${co && co.has_logo ? '<img class="logo" src="/api/company/logo" alt="">' : ''}
-        <div>
-          <div class="company">${esc(me.company)}</div>
-          <div style="color:#64748b;font-size:9.5pt">${esc(me.name)}${co && co.phone ? ' · ' + esc(co.phone) : ''}${co && co.email ? ' · ' + esc(co.email) : ''}</div>
-          ${coLines.length ? `<div class="company-details">${coLines.map(esc).join('<br>')}</div>` : ''}
-        </div>
-      </div>
-    </div>
-    <div class="doctype"><h1>${TITLES[d.doc_type]}</h1><div class="num">${esc(d.number)} · Issued: ${esc(d.issue_date)}</div></div>
-  </div>
-  <div class="parties">
-    <div class="party"><h3>From</h3><b>${esc(me.company)}</b>${coLines.length ? `<div style="font-size:9pt;color:#334155;margin-top:4px">${coLines.map(esc).join('<br>')}</div>` : ''}</div>
-    <div class="party"><h3>To</h3><b>${esc(d.customer)}</b></div>
-  </div>
-  <table class="items">
-    <thead><tr><th style="width:20px">#</th><th style="width:80px">Code</th><th>Product / service</th><th style="width:90px">Tax code</th><th class="amount">Qty</th><th class="amount">Unit price</th><th class="amount">Sum</th></tr></thead>
-    <tbody>${rowsHtml}</tbody>
-  </table>
-  <table class="totals">
-    ${vatRows}
-    <tr><td>Total incl. VAT</td><td class="amount">${fmt(d.amount_cents, d.currency)}</td></tr>
-    ${d.doc_type === 'invoice' || d.doc_type === 'bill' ? `
-    <tr><td>Paid to date</td><td class="amount green">${fmt((d.paid_cents || 0), d.currency)}</td></tr>
-    <tr><td>Remaining</td><td class="amount ${remaining > 0 ? 'red' : 'green'}">${fmt((d.amount_cents - (d.paid_cents || 0)), d.currency)}</td></tr>` : ''}
-    <tr class="grand"><td class="grand">Total ${d.doc_type === 'quote' ? 'offered' : 'due'}</td><td class="amount grand">${fmt(remaining > 0 && d.doc_type !== 'quote' ? (d.amount_cents - (d.paid_cents || 0)) : d.amount_cents, d.currency)}</td></tr>
-  </table>
-  ${d.due_date ? `<div class="meta"><b>Payment/delivery due:</b> ${esc(d.due_date)}</div>` : ''}
-  ${bank && (d.doc_type === 'invoice' || d.doc_type === 'quote') ? `<div class="meta"><b>Pay to:</b> ${esc([bank.name, bank.iban, bank.swift].filter(Boolean).join(' · '))}</div>` : ''}
-  <div class="meta"><b>Status:</b> ${esc(d.status)}</div>
-  <div class="foot"><span>Printed on ${today}</span><span>Generated with Reda — lite ERP for small business</span></div>
-</body></html>`;
-  const f = document.createElement('iframe');
-  f.style.display = 'none';
-  f.srcdoc = REDA_I18N.translateHtml(html);
-  f.onload = () => { f.contentWindow.focus(); f.contentWindow.print(); setTimeout(() => f.remove(), 60000); };
-  document.body.appendChild(f);
-}
-
-function viewDashboard(me) {
-  const TYPE_LABELS = { quote: 'Offer', delivery: 'Delivery note', invoice: 'Invoice', bill: 'Purchase bill' };
-  let filter = 'all';
-  let custFilter = '';
-  let sortKey = 'new';
-  let docQuery = '';
-
-  appShell(me, 'dashboard', `
-    <div class="topline">
-      <h1>Documents & money</h1>
-      <span class="company-chip">🏢 ${esc(me.company)}</span>
-    </div>
-    <div class="stat-grid" id="stats"></div>
-    <div class="page-grid">
-    <div class="col-main">
-    <div class="card">
-      <h2>New document</h2>
-      <form id="invForm" class="form-row">
-        <div><label>Type</label><select id="doc_type">
-          <option value="invoice">🧾 Invoice (you invoice a customer)</option>
-          <option value="quote">📝 Offer / quote</option>
-          <option value="delivery">📦 Delivery note</option>
-          <option value="bill">📥 Purchase bill (supplier invoiced you)</option>
-        </select></div>
-        <div style="position:relative"><label>Customer / supplier</label>
-          <input id="customer" required placeholder="Start typing a name, phone or email…" autocomplete="off">
-          <input type="hidden" id="contact_id" value="">
-          <div id="contactSuggest" style="display:none;position:absolute;z-index:10;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.12);width:100%;max-height:220px;overflow:auto"></div>
-        </div>
-        <div><label>Currency</label><select id="currency"><option>EUR</option><option>USD</option><option>GBP</option></select></div>
-        <div><label>Bank account for payment</label><select id="bankSel"><option value="">— default (first) —</option></select></div>
-        <div><label>Document date</label><input id="issue_date" type="date"></div>
-        <div><label>Payment due date</label><input id="due_date" type="date"></div>
-        <div style="grid-column: 1 / -1"><label>Note (optional)</label><input id="description" placeholder="Extra note for this document"></div>
-
-        <div style="grid-column: 1 / -1">
-          <label>Products / services</label>
-          <table id="itemsTable" style="margin-bottom:.5rem">
-            <thead><tr><th style="width:2.2rem">#</th><th style="width:14%">Code</th><th>Product / service name</th><th style="width:13%">Tax code (optional)</th><th style="width:5.5rem">Qty</th><th style="width:7rem">Unit price</th><th style="width:7.5rem">Line sum</th><th style="width:2rem"></th></tr></thead>
-            <tbody id="itemsBody"></tbody>
-          </table>
-          <button class="btn small secondary" id="addRow" type="button">+ Add line</button>
-        </div>
-
-        <div><label>VAT country (local law)</label><select id="vat_country"></select></div>
-        <div><label>VAT rate</label><select id="vat_rate"></select>
-          <input id="vat_custom" type="text" inputmode="decimal" placeholder="e.g. 25,5" style="display:none;margin-top:.3rem"></div>
-        <div><label>Sum without VAT</label><input id="sum_excl" disabled placeholder="0.00"></div>
-        <div><label>VAT amount</label><input id="sum_vat" disabled placeholder="0.00"></div>
-        <div><label><b>Total with VAT</b></label><input id="sum_total" disabled style="font-weight:bold" placeholder="0.00"></div>
-        <button class="btn small" type="submit" style="grid-column: 1 / -1">Add document</button>
-      </form>
-      <div class="error-msg" id="err"></div>
-    </div>
-    <div class="card" style="margin-top:1.2rem">
-      <h2>📦 My stock (inventory)</h2>
-      <p class="sub">What is in your warehouse right now. It counts goods received from purchase bills (steps “Received” or “Paid”) and takes out what you delivered (delivery notes marked “delivered” and invoices marked “sent” or “paid”).</p>
-      <input type="search" id="stockSearch" placeholder="🔎 Find a product…" style="margin:.4rem 0 .8rem">
-      <div id="stockBox"><p class="empty">Loading…</p></div>
-    </div>
-    <div class="panel-grid">
-    <div class="card">
-      <h2>📷 Scan a document (optional)</h2>
-      <p class="sub">Photo, <b>PDF</b> or <b>Excel/CSV</b> — Reda reads it and fills the form. Files are processed <b>on your computer</b> and never uploaded anywhere. First use needs internet (~15&nbsp;MB engine, cached afterwards).</p>
-      <input type="file" id="scanFile" accept="image/*,.pdf,.xlsx,.xls,.csv" hidden>
-      <button class="btn small secondary" id="scanBtn" type="button">📷 Scan / photo / PDF / Excel</button>
-      <span id="scanStatus" class="sub"></span>
-      <div id="scanPreview" style="display:none;margin-top:.8rem"></div>
-      <div id="scanActions" style="display:none;margin-top:.8rem;gap:.6rem;flex-wrap:wrap">
-        <button class="btn small secondary" id="scanBill" type="button">📥 Supplier bill</button>
-        <button class="btn small" id="scanSell" type="button">📤 I'm selling this</button>
-      </div>
-    </div>
-      <div class="card"><h2>🛒 Purchase steps</h2><div id="pipeBox"><p class="empty">Loading…</p></div></div>
-      <div class="card"><h2>💼 By customer</h2><p class="sub" style="margin-bottom:.5rem">Click a customer to show only their documents. Red = still owes you.</p><div id="custBox"><p class="empty">Loading…</p></div></div>
-      <div class="card"><h2>💰 Unpaid — who to chase, what to pay</h2><p class="sub" style="margin-bottom:.5rem">🟡 yellow = payment due today · 🔴 red = overdue. Supplier bills = money YOU must pay — top priority.</p><div id="unpaidBox"><p class="empty">Loading…</p></div></div>
-    </div>
-    </div>
-    <aside class="side">
-      <div class="card">
-        <h2>Your documents</h2>
-        <input type="search" id="docSearch" placeholder="🔎 Search by word, name, number or amount…" style="width:100%;margin:.4rem 0 .8rem">
-        <div id="tabs"></div>
-        <div style="display:flex;gap:.6rem;align-items:center;margin:.6rem 0;flex-wrap:wrap">
-          <span class="sub" style="margin:0">Sort:</span>
-          <select id="sortSel" style="width:auto;padding:.3rem .5rem">
-            <option value="new">Newest first</option>
-            <option value="cust">Customer A–Z</option>
-            <option value="amount">Amount high → low</option>
-            <option value="due">Due date (soonest)</option>
-            <option value="unpaid">Unpaid first</option>
-          </select>
-          <span id="activeCustFilter" style="display:none"></span>
-        </div>
-        <div id="invList"><p class="empty">Loading…</p></div>
-      </div>
-    </aside>
-    </div>`);
-
-  async function load() {
-    const { invoices: docs, totals } = await api('/api/invoices');
-    const t = totals;
-    document.getElementById('stats').innerHTML = `
-      <div class="stat"><div class="label">Customers owe you</div><div class="value" style="color:var(--amber)">${fmt(t.customers_owe)}</div></div>
-      <div class="stat"><div class="label">You owe suppliers</div><div class="value" style="color:var(--red)">${fmt(t.you_owe)}</div></div>
-      <div class="stat"><div class="label">Sales invoiced</div><div class="value">${fmt(t.sales_invoiced)}</div></div>
-      <div class="stat"><div class="label">Sales paid</div><div class="value" style="color:var(--green)">${fmt(t.sales_paid)}</div></div>
-      <div class="stat"><div class="label">Open offers</div><div class="value">${t.quotes_open}</div><div class="label">${fmt(t.quotes_value)}</div></div>`;
-
-    const counts = { all: docs.length, quote: 0, delivery: 0, invoice: 0, bill: 0 };
-    docs.forEach((d) => counts[d.doc_type] = (counts[d.doc_type] || 0) + 1);
-    document.getElementById('tabs').innerHTML = `
-      <p class="sub">${['all', 'quote', 'delivery', 'invoice', 'bill'].map((k) =>
-        `<a href="#" data-tab="${k}" style="margin-right:1rem;${filter === k ? 'font-weight:700;text-decoration:underline' : ''}">${k === 'all' ? 'All' : TYPE_LABELS[k]} (${counts[k] || 0})</a>`).join('')}</p>`;
-    document.querySelectorAll('#tabs a').forEach((a) => a.onclick = (e) => { e.preventDefault(); filter = a.dataset.tab; load(); });
-
-    // Right panel: purchase steps (bills)
-    const bills = docs.filter((d) => d.doc_type === 'bill');
-    const step = (st, label) => {
-      const b = bills.filter((x) => x.status === st);
-      const sum = b.reduce((s, x) => s + x.amount_cents - x.paid_cents, 0);
-      return `<div class="pipe-row"><span>${label}</span><b>${b.length}</b><span style="color:${sum > 0 ? 'var(--red)' : 'var(--green)'}">${b.length ? fmt(sum) : ''}</span></div>`;
-    };
-    document.getElementById('pipeBox').innerHTML = bills.length ? `
-      ${step('draft', '📝 1. Decided to buy')}
-      ${step('ordered', '📤 2. Ordered (email sent)')}
-      ${step('received', '📥 3. In stock')}
-      ${step('paid', '✔ 4. Paid')}
-      <p class="sub" style="margin-top:.5rem">Buttons on each bill row move it to the next step.</p>`
-      : '<p class="empty">No purchase bills yet. Scan a supplier bill and choose “Purchase bill”.</p>';
-
-    // Right panel: by customer (sales invoices)
-    const byCust = {};
-    docs.filter((d) => d.doc_type === 'invoice').forEach((d) => {
-      const k = d.customer || '(no name)';
-      byCust[k] = byCust[k] || { invoiced: 0, paid: 0 };
-      byCust[k].invoiced += d.amount_cents; byCust[k].paid += d.paid_cents;
-    });
-    const custRows = Object.entries(byCust).map(([name, v]) => ({ name, ...v, owed: v.invoiced - v.paid }))
-      .sort((a, b) => b.owed - a.owed);
-    document.getElementById('custBox').innerHTML = custRows.length ? custRows.map((c) => `
-      <div class="cust-row${custFilter === c.name ? ' active' : ''}" data-cust="${esc(c.name)}">
-        <span class="cust-name">${esc(c.name)}</span>
-        <span style="color:${c.owed > 0 ? 'var(--red)' : 'var(--green)'};white-space:nowrap">${fmt(c.owed)}</span>
-      </div>`).join('') : '<p class="empty">No sales invoices yet.</p>';
-    document.querySelectorAll('.cust-row').forEach((r) => r.onclick = () => {
-      custFilter = custFilter === r.dataset.cust ? '' : r.dataset.cust;
-      renderCustChip();
-      load();
-    });
-
-    // Panel: unpaid list — overdue first, then bills you must pay, then customer debts
-    const todayU = new Date().toISOString().slice(0, 10);
-    const dueStateU = (d) => !d.due_date ? '' : d.due_date < todayU ? 'overdue' : d.due_date === todayU ? 'due-today' : '';
-    const unpaid = docs.filter((d) => (d.doc_type === 'invoice' || d.doc_type === 'bill') && d.amount_cents - d.paid_cents > 0)
-      .sort((a, b) => {
-        const o = (x) => (x.due_date && x.due_date < todayU ? 0 : x.doc_type === 'bill' ? 1 : 2);
-        return o(a) - o(b) || String(a.due_date || '9999').localeCompare(String(b.due_date || '9999'));
-      });
-    document.getElementById('unpaidBox').innerHTML = unpaid.length ? unpaid.slice(0, 8).map((d) => `
-      <div class="unpaid-row ${dueStateU(d)}">
-        <span class="cust-name">${d.doc_type === 'bill' ? '🏭 <b>Preču piegādātājs:</b> ' : ''}${esc(d.customer)}</span>
-        <span style="white-space:nowrap">${fmt(d.amount_cents - d.paid_cents, d.currency)}<div style="color:var(--muted);font-size:.75rem">due ${esc(d.due_date || '—')}${dueStateU(d) === 'overdue' ? ' 🔴 overdue' : dueStateU(d) === 'due-today' ? ' 🟡 today' : ''}</div></span>
-      </div>`).join('') + (unpaid.length > 8 ? `<p class="sub">…and ${unpaid.length - 8} more</p>` : '')
-      : '<p class="empty">Nothing unpaid. ✔</p>';
-
-    // Left column: my stock (goods in minus goods out)
-    const stock = {};
-    const moved = (d, dir) => {
-      (d.items || []).forEach((it) => {
-        const key = (it.code ? it.code + ' · ' : '') + (it.name || '').trim();
-        if (!key || key === ' · ') return;
-        stock[key] = stock[key] || { qty: 0, cost: 0, costN: 0 };
-        stock[key].qty += dir * (Number(it.qty) || 0);
-        if (dir > 0 && it.unit_price_cents >= 0) { stock[key].cost += Number(it.unit_price_cents) || 0; stock[key].costN++; }
-      });
-    };
-    docs.forEach((d) => {
-      if (d.doc_type === 'bill' && (d.status === 'received' || d.status === 'paid')) moved(d, 1);
-      if (d.doc_type === 'delivery' && d.status === 'delivered') moved(d, -1);
-      if (d.doc_type === 'invoice' && (d.status === 'sent' || d.status === 'paid')) moved(d, -1);
-    });
-    const stockRows = Object.entries(stock).map(([name, v]) => ({ name, qty: v.qty, unitCost: v.costN ? Math.round(v.cost / v.costN) : null }))
-      .sort((a, b) => b.qty - a.qty || a.name.localeCompare(b.name));
-    const renderStock = () => {
-      const q = (document.getElementById('stockSearch').value || '').toLowerCase();
-      const rows = stockRows.filter((r) => !q || r.name.toLowerCase().includes(q));
-      document.getElementById('stockBox').innerHTML = rows.length ? `
-        <table><thead><tr><th>Product</th><th>In stock</th><th>Unit cost (last)</th><th>Value</th></tr></thead>
-        <tbody>${rows.map((r) => `
-          <tr>
-            <td>${esc(r.name)}</td>
-            <td style="font-weight:700;color:${r.qty > 0 ? 'var(--green)' : r.qty < 0 ? 'var(--red)' : 'var(--muted)'}">${r.qty}</td>
-            <td>${r.unitCost != null ? fmt(r.unitCost) : '—'}</td>
-            <td>${r.unitCost != null ? fmt(Math.max(r.qty, 0) * r.unitCost) : '—'}</td>
-          </tr>`).join('')}</tbody></table>`
-        : '<p class="empty">No stock yet. Add products as lines to a purchase bill and press “📥 Received” when they arrive — they appear here automatically.</p>';
-    };
-    renderStock();
-    document.getElementById('stockSearch').oninput = renderStock;
-
-    function renderCustChip() {
-      const chip = document.getElementById('activeCustFilter');
-      if (!custFilter) { chip.style.display = 'none'; chip.innerHTML = ''; return; }
-      chip.style.display = 'inline-block';
-      chip.innerHTML = `<span class="badge invoice">${esc(custFilter)}</span> <a href="#" id="clearCust">✕ clear</a>`;
-      document.getElementById('clearCust').onclick = (e) => { e.preventDefault(); custFilter = ''; renderCustChip(); load(); };
-    }
-
-    let shown = filter === 'all' ? docs.slice() : docs.filter((d) => d.doc_type === filter);
-    if (custFilter) shown = shown.filter((d) => d.customer === custFilter);
-    // free-text search: number, name, note, status, amount, product lines — whatever the user types
-    if (docQuery) {
-      const q = docQuery.toLowerCase();
-      shown = shown.filter((d) =>
-        [d.number, d.customer, d.description, d.status, d.due_date,
-          (d.amount_cents / 100).toFixed(2), String(d.amount_cents / 100),
-          ...(d.items || []).flatMap((it) => [it.code, it.name])]
-          .some((v) => v != null && String(v).toLowerCase().includes(q)));
-    }
-    if (sortKey === 'cust') shown.sort((a, b) => String(a.customer).localeCompare(String(b.customer)));
-    else if (sortKey === 'amount') shown.sort((a, b) => b.amount_cents - a.amount_cents);
-    else if (sortKey === 'due') shown.sort((a, b) => String(a.due_date || '9999').localeCompare(String(b.due_date || '9999')));
-    else if (sortKey === 'unpaid') shown.sort((a, b) => (b.amount_cents - b.paid_cents) - (a.amount_cents - a.paid_cents));
-    const today = new Date().toISOString().slice(0, 10);
-    const dueState = (d, remaining) => (!d.due_date || remaining <= 0) ? ''
-      : d.due_date < today ? 'overdue' : d.due_date === today ? 'due-today' : '';
-    document.getElementById('invList').innerHTML = shown.length ? `
-      <table><thead><tr><th>№</th><th>Type</th><th>Customer</th><th>Amount</th><th>Paid</th><th>Remaining</th><th>Due</th><th>Status</th><th></th></tr></thead>
-      <tbody>${shown.map((d) => {
-        const payable = d.doc_type === 'invoice' || d.doc_type === 'bill';
-        const remaining = d.amount_cents - d.paid_cents;
-        return `
-        <tr class="${dueState(d, remaining)}">
-          <td>${esc(d.number)}${d.parent_id ? `<div style="color:var(--muted);font-size:.75rem">← converted</div>` : ''}${/scanned/.test(d.description || '') ? `<span title="Scanned document — check fields by hand" style="display:inline-block;width:12px;height:12px;background:#dc2626;border-radius:2px;vertical-align:middle;margin-left:.4rem"></span><span style="color:#b91c1c;font-size:.72rem"> check</span>` : ''}</td>
-          <td><span class="badge ${d.doc_type}">${TYPE_LABELS[d.doc_type]}</span></td>
-          <td>${esc(d.customer)}${d.description ? `<div style="color:var(--muted);font-size:.8rem">${esc(d.description)}</div>` : ''}</td>
-          <td>${fmt(d.amount_cents, d.currency)}</td>
-          ${payable
-            ? `<td style="color:var(--green)">${fmt(d.paid_cents, d.currency)}</td>
-               <td style="color:${remaining > 0 ? 'var(--red)' : 'var(--green)'}">${fmt(remaining, d.currency)}</td>`
-            : '<td>—</td><td>—</td>'}
-          <td>${esc(d.due_date || '—')}${dueState(d, remaining) === 'overdue' ? ' 🔴' : dueState(d, remaining) === 'due-today' ? ' 🟡' : ''}</td>
-          <td><span class="badge ${d.status}">${d.status}</span></td>
-          <td class="actions">
-            <button data-id="${d.id}" class="print">🖨 PDF</button>
-            ${d.doc_type === 'bill' && d.status === 'draft' ? `<button data-id="${d.id}" class="send billstep" data-st="ordered">📤 Order</button>` : ''}
-            ${d.doc_type === 'bill' && d.status === 'ordered' ? `<button data-id="${d.id}" class="send billstep" data-st="received">📥 Received</button>` : ''}
-            ${d.status === 'draft' && d.doc_type !== 'bill' ? `<button data-id="${d.id}" class="send" data-st="sent">Mark sent</button>` : ''}
-            ${d.doc_type === 'quote' ? `<button data-id="${d.id}" class="conv" data-to="invoice">→ Invoice</button><button data-id="${d.id}" class="conv" data-to="delivery">→ Delivery</button>` : ''}
-            ${d.doc_type === 'delivery' || d.doc_type === 'bill' ? `<button data-id="${d.id}" class="conv" data-to="invoice">→ Invoice</button>` : ''}
-            ${d.items && d.items.length ? `<button data-id="${d.id}" class="reuse" title="Copy these products into the New document form">➕ Lines</button>` : ''}
-            ${payable && remaining > 0 ? `<button data-id="${d.id}" data-rem="${remaining / 100}" class="pay">💰 Pay</button>` : ''}
-            ${d.status === 'sent' && d.doc_type === 'quote' ? `<button data-id="${d.id}" class="acc">✔ Accepted</button>` : ''}
-            <button data-id="${d.id}" class="del danger">Delete</button>
-          </td>
-        </tr>`;
-      }).join('')}</tbody></table>`
-      : '<p class="empty">No documents here yet — create one above. Only your company can see these.</p>';
-
-    document.querySelectorAll('.print').forEach((b) => b.onclick = () => {
-      const d = docs.find((x) => x.id === +b.dataset.id);
-      if (d) printDoc(me, d);
-    });
-    document.querySelectorAll('.send').forEach((b) => b.onclick = async () => {
-      await api('/api/invoices/status', 'PATCH', { id: +b.dataset.id, status: b.dataset.st || 'sent' });
-      load();
-    });
-    const sortSel = document.getElementById('sortSel');
-    if (sortSel) sortSel.onchange = () => { sortKey = sortSel.value; load(); };
-    const ds = document.getElementById('docSearch');
-    if (ds) ds.oninput = () => { docQuery = ds.value.trim(); load(); };
-    document.querySelectorAll('.acc').forEach((b) => b.onclick = async () => {
-      await api('/api/invoices/status', 'PATCH', { id: +b.dataset.id, status: 'accepted' });
-      load();
-    });
-    document.querySelectorAll('.conv').forEach((b) => b.onclick = async () => {
-      const r = await api('/api/invoices/convert', 'POST', { id: +b.dataset.id, to: b.dataset.to });
-      alert(`Created ${r.number} — it's in the list now.`);
-      load();
-    });
-    // ➕ Lines: copy this document's products into the New document form (no retyping)
-    document.querySelectorAll('.reuse').forEach((b) => b.onclick = () => {
-      const src = docs.find((x) => x.id === +b.dataset.id);
-      if (!src || !src.items || !src.items.length) return;
-      itemsBody.innerHTML = ''; // start fresh with the copied lines
-      for (const it of src.items) {
-        addRowEl(it.code || '', it.name, it.qty, (it.unit_price_cents / 100).toFixed(2));
-      }
-      updateTotals();
-      // selling on what you bought? default to a sales invoice; customer stays empty for you to pick
-      if (src.doc_type === 'bill') document.getElementById('doc_type').value = 'invoice';
-      document.getElementById('contact_id').value = '';
-      custInput.value = '';
-      document.getElementById('invForm').scrollIntoView({ behavior: 'smooth' });
-      const n = src.items.length;
-      document.getElementById('scanStatus').textContent = `✅ ${n} product line${n > 1 ? 's' : ''} copied — set the customer and your selling price, then press "Add document".`;
-    });
-    document.querySelectorAll('.pay').forEach((b) => b.onclick = async () => {
-      const input = prompt(`Payment amount (e.g. ${b.dataset.rem}):`, b.dataset.rem);
-      if (input === null) return;
-      try {
-        await api('/api/invoices/payments', 'POST', { invoice_id: +b.dataset.id, amount: input });
-        load();
-      } catch (e) { alert(e.message); }
-    });
-    document.querySelectorAll('.del').forEach((b) => b.onclick = async () => {
-      if (confirm('Delete this document?')) {
-        await api('/api/invoices?id=' + b.dataset.id, 'DELETE');
-        load();
-      }
-    });
-  }
-
-  document.getElementById('scanBtn').onclick = () => document.getElementById('scanFile').click();
-  // ---- line items editor ----
-  const itemsBody = document.getElementById('itemsBody');
-  function addRowEl(code = '', name = '', qty = '1', price = '') {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td class="rowNo"></td>
-      <td><input class="it-code" placeholder="SKU-1" maxlength="60"></td>
-      <td><input class="it-name" placeholder="Product or service" maxlength="300"></td>
-      <td><input class="it-tax" placeholder="Optional (CN/VAT)" maxlength="30" title="Tax/tariff code, e.g. 4407 for sawn wood — optional"></td>
-      <td><input class="it-qty" type="text" inputmode="decimal" placeholder="1" value="${esc(String(qty))}"></td>
-      <td><input class="it-price" type="text" inputmode="decimal" placeholder="0.00" value="${esc(String(price))}"></td>
-      <td class="it-sum" style="text-align:right;white-space:nowrap">—</td>
-      <td><button type="button" class="it-del danger" title="Remove line" style="padding:0 .4rem">×</button></td>`;
-    itemsBody.appendChild(tr);
-    tr.querySelector('.it-del').onclick = () => { tr.remove(); renumber(); updateTotals(); };
-    tr.querySelectorAll('input').forEach((i) => i.addEventListener('input', updateTotals));
-    renumber(); updateTotals();
-    return tr;
-  }
-  function renumber() {
-    [...itemsBody.children].forEach((tr, i) => { tr.querySelector('.rowNo').textContent = i + 1; });
-  }
-  function collectItems() {
-    return [...itemsBody.children].map((tr) => ({
-      code: tr.querySelector('.it-code').value.trim(),
-      name: tr.querySelector('.it-name').value.trim(),
-      tax_code: tr.querySelector('.it-tax').value.trim(),
-      qty: tr.querySelector('.it-qty').value,
-      unit_price: tr.querySelector('.it-price').value,
-    }));
-  }
-  function updateTotals() {
-    const rate = Number(String(getVatRate()).replace(',', '.')) || 0;
-    let excl = 0;
-    [...itemsBody.children].forEach((tr) => {
-      const qty = Number(String(tr.querySelector('.it-qty').value).replace(',', '.')) || 0;
-      const price = Math.round((Number(String(tr.querySelector('.it-price').value).replace(',', '.')) || 0) * 100);
-      const sum = Math.round(qty * price);
-      tr.querySelector('.it-sum').textContent = sum ? fmt(sum) : '—';
-      excl += sum;
-    });
-    const vat = Math.round(excl * rate / 100);
-    document.getElementById('sum_excl').value = (excl / 100).toFixed(2);
-    document.getElementById('sum_vat').value = (vat / 100).toFixed(2);
-    document.getElementById('sum_total').value = ((excl + vat) / 100).toFixed(2);
-  }
-  // ---- EU VAT picker: country presets (local law) + custom manual rate ----
-  const vatCountry = document.getElementById('vat_country');
-  const vatRateSel = document.getElementById('vat_rate');
-  const vatCustom = document.getElementById('vat_custom');
-  vatCountry.innerHTML = Object.entries(EU_VAT)
-    .map(([code, c]) => `<option value="${code}" ${code === 'LV' ? 'selected' : ''}>${c.name}</option>`).join('');
-  function populateRates() {
-    const rates = EU_VAT[vatCountry.value].rates;
-    vatRateSel.innerHTML = rates.map((r) => `<option value="${r}">${r}%${r === 0 ? ' (no VAT)' : ''}</option>`).join('')
-      + '<option value="custom">✏️ Other — type it…</option>';
-    vatCustom.style.display = 'none';
-    updateTotals();
-  }
-  const getVatRate = () => {
-    if (vatRateSel.value === 'custom') return vatCustom.value.trim();
-    return vatRateSel.value;
-  };
-  vatCountry.addEventListener('change', populateRates);
-  vatRateSel.addEventListener('change', () => {
-    vatCustom.style.display = vatRateSel.value === 'custom' ? 'block' : 'none';
-    if (vatRateSel.value === 'custom') vatCustom.focus();
-    updateTotals();
-  });
-  vatCustom.addEventListener('input', updateTotals);
-  populateRates();
-  document.getElementById('addRow').onclick = () => {
-    const tr = addRowEl();
-    tr.querySelector(itemsBody.children.length === 1 ? '.it-name' : '.it-name').focus();
-  };
-  addRowEl(); // start with one empty line
-  // document date defaults to today, but the user can change it freely
-  document.getElementById('issue_date').value = new Date().toISOString().slice(0, 10);
-
-  // ---- customer search (saved contacts: search by name, person, phone or email) ----
-  const custInput = document.getElementById('customer');
-  const suggestBox = document.getElementById('contactSuggest');
-  let searchTimer = null;
-  custInput.addEventListener('input', () => {
-    document.getElementById('contact_id').value = ''; // typing manually = not linked anymore
-    clearTimeout(searchTimer);
-    const q = custInput.value.trim();
-    if (q.length < 1) { suggestBox.style.display = 'none'; return; }
-    searchTimer = setTimeout(async () => {
-      try {
-        const { contacts } = await api('/api/contacts?q=' + encodeURIComponent(q));
-        if (!contacts.length) { suggestBox.style.display = 'none'; return; }
-        suggestBox.innerHTML = contacts.map((c) => `
-          <div class="sug" data-id="${c.id}" data-name="${esc(c.name)}" style="padding:.5rem .7rem;cursor:pointer;border-bottom:1px solid var(--line)">
-            <b>${esc(c.name)}</b> <span class="sub">${c.kind === 'person' ? '👤 person' : '🏢 company'}</span>
-            <div class="sub">${esc([c.phone, c.email, c.vat_no].filter(Boolean).join(' · '))}</div>
-          </div>`).join('');
-        suggestBox.style.display = 'block';
-        suggestBox.querySelectorAll('.sug').forEach((el) => el.onmousedown = (e) => {
-          e.preventDefault();
-          custInput.value = el.dataset.name;
-          document.getElementById('contact_id').value = el.dataset.id;
-          suggestBox.style.display = 'none';
-        });
-      } catch { suggestBox.style.display = 'none'; }
-    }, 200);
-  });
-  custInput.addEventListener('blur', () => setTimeout(() => suggestBox.style.display = 'none', 150));
-
-  // ---- scan flow: show the original + two ways to use it ----
-  let lastScan = null; // { parsed, kind, preview }
-  document.getElementById('scanFile').onchange = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const status = document.getElementById('scanStatus');
-    e.target.value = '';
-    document.getElementById('scanActions').style.display = 'none';
-    document.getElementById('scanPreview').style.display = 'none';
-    try {
-      const { text, kind, preview } = await fileToInvoiceText(file, (s) => status.textContent = s);
-      const parsed = parseInvoiceText(text);
-      lastScan = { parsed, kind, preview, file }; // keep the original — it will be stored with the document
-      // show the original document next to the form so you can check it
-      const found = ['customer', 'amount', 'due_date', 'invoiceNo'].filter((k) => parsed[k]).length;
-      // red warning box when something could not be read — the user must check that place manually
-      const missing = [['customer', 'customer name'], ['amount', 'total amount'], ['due_date', 'payment due date']]
-        .filter(([k]) => !parsed[k]).map(([, label]) => label);
-      const warnBox = missing.length
-        ? `<div style="margin-top:.6rem;border:2px solid #dc2626;background:#fef2f2;color:#b91c1c;border-radius:8px;padding:.6rem .8rem;display:flex;gap:.6rem;align-items:flex-start">
-             <span style="width:16px;height:16px;background:#dc2626;border-radius:2px;flex:none;margin-top:2px"></span>
-             <span><b>Reading problem:</b> could not read ${missing.join(', ')}. 🔴 Fill these fields by hand — see the original below.</span>
-           </div>`
-        : '';
-      if (preview) {
-        document.getElementById('scanPreview').innerHTML = `
-          <div style="position:relative;display:inline-block;border:1px solid var(--border);border-radius:10px;padding:.4rem;background:#fff">
-            <img src="${preview}" alt="Scanned original" style="max-height:300px;max-width:100%;border-radius:6px${missing.length ? ';outline:3px solid #dc2626;outline-offset:2px' : ''}">
-            ${missing.length ? '<div style="position:absolute;top:.6rem;left:.6rem;width:18px;height:18px;background:#dc2626;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4)"></div>' : ''}
-            <button type="button" id="scanClose" title="Close preview" style="position:absolute;top:.5rem;right:.5rem;background:rgba(0,0,0,.55);color:#fff;border:none;border-radius:7px;width:24px;height:24px;cursor:pointer">×</button>
-          </div>
-          ${warnBox}`;
-        document.getElementById('scanPreview').style.display = 'block';
-        document.getElementById('scanClose').onclick = () => {
-          document.getElementById('scanPreview').style.display = 'none';
-          document.getElementById('scanActions').style.display = 'none';
-          status.textContent = '';
-        };
-      } else if (warnBox) {
-        document.getElementById('scanPreview').innerHTML = warnBox;
-        document.getElementById('scanPreview').style.display = 'block';
-      }
-      status.textContent = found
-        ? `✅ Read the document (found ${found} of 4 fields). Check it in the preview and choose below how to use it.`
-        : '⚠️ Could not read the fields reliably — try a sharper photo with better light, or fill in manually.';
-      document.getElementById('scanActions').style.display = 'flex';
-    } catch (err) {
-      status.textContent = `⚠️ ${err.message}`;
-    }
-  };
-
-  const applyScan = async (mode) => {
-    if (!lastScan) return;
-    const { parsed, kind } = lastScan;
-    const parts = [];
-    if (parsed.invoiceNo) parts.push(`Invoice ${parsed.invoiceNo}`);
-    if (parsed.vat) parts.push(`VAT ${parsed.vat}`);
-    document.getElementById('description').value = parts.length ? `${parts.join(', ')} (scanned — please check)` : '';
-    document.getElementById('currency').value = parsed.currency;
-    itemsBody.innerHTML = '';
-    document.getElementById('contact_id').value = '';
-    if (parsed.amount) {
-      const rate = Number(String(getVatRate()).replace(',', '.')) || 0;
-      const total = Math.round(Number(parsed.amount) * 100);
-      // scanned totals usually include VAT: reverse it out for the "without VAT" line price
-      const excl = rate > 0 ? Math.round(total / (1 + rate / 100)) : total;
-      addRowEl('', 'Scanned goods — please check', '1', (excl / 100).toFixed(2));
-    }
-    if (mode === 'bill') {
-      // possibility 1: it's a supplier's document — save it as a Purchase bill
-      document.getElementById('doc_type').value = 'bill';
-      custInput.value = parsed.customer || '';
-      document.getElementById('due_date').value = parsed.due_date || '';
-      // automatically save this supplier into the contact library (if not there yet)
-      try {
-        const q = encodeURIComponent(parsed.customer || parsed.vat || '');
-        const { contacts } = await api('/api/contacts' + (q ? `?q=${q}` : ''));
-        let supplier = contacts.find((c) => (parsed.customer && c.name === parsed.customer) || (parsed.vat && c.vat_no === parsed.vat));
-        if (!supplier) {
-          const r = await api('/api/contacts', 'POST', {
-            kind: 'company', name: parsed.customer || 'Unknown supplier (scanned)',
-            vat_no: parsed.vat || '', reg_no: parsed.reg_no || '',
-          });
-          supplier = { id: r.id, name: parsed.customer };
-          document.getElementById('scanStatus').textContent = `✅ Supplier "${parsed.customer}" saved to your contact library — filled as Purchase bill. Check the fields, then press "Add document".`;
-        } else {
-          document.getElementById('scanStatus').textContent = `✅ Supplier "${supplier.name}" was already in your library. Filled as Purchase bill — check the fields, then press "Add document".`;
-        }
-        document.getElementById('contact_id').value = supplier.id;
-        custInput.value = parsed.customer || supplier.name;
-      } catch {
-        document.getElementById('scanStatus').textContent = '✅ Filled as Purchase bill — check the fields, then press "Add document".';
-      }
-    } else {
-      // possibility 2: you're selling the same thing — copy only the total into your Invoice
-      document.getElementById('doc_type').value = 'invoice';
-      custInput.value = '';
-      document.getElementById('due_date').value = '';
-      document.getElementById('scanStatus').textContent = '✅ Total copied into your Invoice — pick the customer, adjust the price to your selling price, then press "Add document".';
-    }
-    updateTotals();
-    document.getElementById('invForm').scrollIntoView({ behavior: 'smooth' });
-  };
-  document.getElementById('scanBill').onclick = () => applyScan('bill');
-  document.getElementById('scanSell').onclick = () => applyScan('sell');
-
-  document.getElementById('invForm').onsubmit = async (e) => {
-    e.preventDefault();
-    try {
-      const items = collectItems();
-      if (items.some((it) => (it.qty || it.unit_price) && !it.name)) {
-        return showError('One line has a price/quantity but no product name — please fill in the name or remove the line.');
-      }
-      const vRateNum = Number(String(getVatRate()).replace(',', '.'));
-      if (!Number.isFinite(vRateNum) || vRateNum < 0 || vRateNum > 100) {
-        return showError('VAT rate must be a number between 0 and 100 (e.g. 21 or 25,5).');
-      }
-      const real = items.filter((it) => it.name);
-      if (real.length && !real.every((it) => it.name && Number(String(it.qty).replace(',', '.')) > 0)) {
-        return showError('Every line needs a product name and a quantity bigger than 0.');
-      }
-      const created = await api('/api/invoices', 'POST', {
-        customer: custInput.value,
-        currency: document.getElementById('currency').value,
-        due_date: document.getElementById('due_date').value,
-        issue_date: document.getElementById('issue_date').value,
-        description: document.getElementById('description').value,
-        doc_type: document.getElementById('doc_type').value,
-        items: real.length ? real : null,
-        vat_rate: getVatRate(),
-        contact_id: document.getElementById('contact_id').value || null,
-        bank_id: document.getElementById('bankSel').value || null,
-      });
-      // if this document came from a scan, store the ORIGINAL file (PDF/photo) with it
-      if (lastScan && lastScan.file) {
-        try {
-          const fr = new FileReader();
-          const dataUrl = await new Promise((resolve, reject) => {
-            fr.onload = () => resolve(fr.result); fr.onerror = reject; fr.readAsDataURL(lastScan.file);
-          });
-          const up = await api('/api/scans', 'POST', { filename: lastScan.file.name, data: dataUrl });
-          if (created && created.number) {
-            await api('/api/scans', 'PATCH', { id: up.id, doc_number: created.number });
-          }
-        } catch (err) { /* scan storage is best-effort: never block the saved document */ }
-        lastScan = null;
-      }
-      e.target.reset();
-      document.getElementById('contact_id').value = '';
-      document.getElementById('issue_date').value = new Date().toISOString().slice(0, 10);
-      itemsBody.innerHTML = '';
-      addRowEl();
-      updateTotals();
-      load();
-    } catch (err) { showError(err.message); }
-  };
-  // fill the bank-account picker from your company profile (banking v9.4)
-  api('/api/company').then((co) => {
-    const sel = document.getElementById('bankSel');
-    if (!sel || !Array.isArray(co.banks) || !co.banks.length) return;
-    sel.innerHTML = '<option value="">— default (first) —</option>' + co.banks
-      .map((b, i) => `<option value="${i + 1}">${esc(`${b.name || 'Bank'} · ${b.iban || ''}`)}</option>`).join('');
-  }).catch(() => {});
-  load().catch((e) => showError(e.message));
-}
-
-function viewScans(me) {
-  appShell(me, 'scans', `
-    <div class="topline"><h1>📎 Scanned originals (PDF / photos)</h1><span class="company-chip">🏢 ${esc(me.company)}</span></div>
-    <div class="card">
-      <p class="sub">Every time you scan a document on the dashboard and save it, the original PDF or photo is stored here automatically — so you always have the source paper. Click a file to open it.</p>
-      <div id="scanFiles"><p class="empty">Loading…</p></div>
-    </div>`);
-  const load = async () => {
-    const { scans } = await api('/api/scans');
-    document.getElementById('scanFiles').innerHTML = scans.length ? `
-      <table><thead><tr><th>File</th><th>Type</th><th>Linked document</th><th>Added</th><th></th></tr></thead>
-      <tbody>${scans.map((s) => `
-        <tr>
-          <td><a href="/api/scans/${s.id}" target="_blank" rel="noopener">📄 ${esc(s.filename)}</a></td>
-          <td>${esc(s.mime)}</td>
-          <td>${s.doc_number ? `<b>${esc(s.doc_number)}</b>` : '<span class="sub">(not linked yet)</span>'}</td>
-          <td>${esc(s.created_at)}</td>
-          <td class="actions"><button data-id="${s.id}" class="sdel danger">Delete</button></td>
-        </tr>`).join('')}</tbody></table>`
-      : '<p class="empty">No scanned originals yet — scan a document on the dashboard and save it, the original appears here.</p>';
-    document.querySelectorAll('.sdel').forEach((b) => b.onclick = async () => {
-      if (!confirm('Delete this scanned original?')) return;
-      await api('/api/scans?id=' + b.dataset.id, 'DELETE');
-      load();
-    });
-  };
-  load().catch((e) => showError(e.message));
-}
-
-function viewContacts(me) {
-  let q = '';
-  appShell(me, 'contacts', `
-    <div class="topline"><h1>Customers & suppliers</h1><span class="company-chip">🏢 ${esc(me.company)}</span></div>
-    <div class="card">
-      <h2>Search</h2>
-      <div class="form-row">
-        <div style="grid-column:1 / -1;position:relative">
-          <input id="cq" placeholder="Search by company, person, phone, email, registration or VAT number…" autocomplete="off">
-          <button class="btn small secondary" id="clearQ" type="button" style="margin-left:.5rem">Clear</button>
-        </div>
-      </div>
-      <div id="contactList"><p class="empty">Loading…</p></div>
-    </div>
-    <div class="card">
-      <h2 id="formTitle">Add new contact</h2>
-      <div class="error-msg" id="err"></div>
-      <form id="contactForm" class="form-row">
-        <div><label>Type</label><select id="c_kind"><option value="company">🏢 Company</option><option value="person">👤 Private person</option></select></div>
-        <div><label>Name *</label><input id="c_name" required placeholder="SIA Example or Jānis Bērziņš"></div>
-        <div><label>Registration no.</label><input id="c_reg_no" placeholder="40001234567"></div>
-        <div><label>VAT (PVN) no.</label><input id="c_vat_no" placeholder="LV40001234567"></div>
-        <div><label>Email</label><input id="c_email" type="email" placeholder="info@example.com"></div>
-        <div><label>Phone</label><input id="c_phone" placeholder="+371 20000000"></div>
-        <div style="grid-column: 1 / -1"><label>Address</label><input id="c_address" placeholder="Street, city, postal code, country"></div>
-        <button class="btn small" type="submit">Save contact</button>
-        <button class="btn small secondary" id="cancelEdit" type="button" style="display:none">Cancel edit</button>
-      </form>
-    </div>
-    <div class="card">
-      <h2>Import from Excel / CSV</h2>
-      <p class="sub">Upload an .xlsx, .xls or .csv file with your customers or suppliers. Recognised columns (any order, English or Latvian): Name / Nosaukums, Email, Phone / Telefons, Registration no. / Reģ. nr., VAT no. / PVN nr., Address / Adrese, Kind / Veids (customer or supplier). Rows with the same name or VAT number as an existing contact are skipped.</p>
-      <input type="file" id="importFile" accept=".xlsx,.xls,.csv" style="max-width:340px">
-      <button class="btn small secondary" id="exportCsv" type="button" style="margin-left:.5rem">Export CSV</button>
-      <p id="importMsg" class="sub"></p>
-    </div>`);
-
+// Verdins — single-page application (plain JavaScript, no frameworks)
+(function () {
+  'use strict';
   const $ = (id) => document.getElementById(id);
-  let editingId = null;
+  const app = $('app');
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const money = (c) => (Number(c || 0) / 100).toFixed(2);
+  const fmD = (d) => { try { return new Date(d).toLocaleDateString(); } catch { return String(d || ''); } };
+  const T = (s) => (window.VERDINS_I18N ? window.VERDINS_I18N.translateText(s) : s);
+  const today = () => new Date().toISOString().slice(0, 10);
 
-  async function load() {
-    const { contacts } = await api('/api/contacts?q=' + encodeURIComponent(q));
-    $('contactList').innerHTML = contacts.length ? `
-      <table><thead><tr><th>Name</th><th>Type</th><th>Reg. no.</th><th>VAT no.</th><th>Email</th><th>Phone</th><th></th></tr></thead>
-      <tbody>${contacts.map((c) => `
-        <tr>
-          <td><b>${esc(c.name)}</b>${c.address ? `<div style="color:var(--muted);font-size:.8rem">${esc(c.address)}</div>` : ''}</td>
-          <td>${c.kind === 'person' ? '👤 person' : '🏢 company'}</td>
-          <td>${esc(c.reg_no || '—')}</td>
-          <td>${esc(c.vat_no || '—')}</td>
-          <td>${esc(c.email || '—')}</td>
-          <td>${esc(c.phone || '—')}</td>
-          <td class="actions">
-            <button data-id="${c.id}" class="cedit">✏️ Edit</button>
-            <button data-id="${c.id}" class="cdel danger">Delete</button>
-          </td>
-        </tr>`).join('')}</tbody></table>`
-      : '<p class="empty">No contacts found. Add your first customer below — then you can pick them by name, phone or email when writing invoices.</p>';
-    $('contactList').querySelectorAll('.cedit').forEach((b) => b.onclick = () => {
-      const c = contacts.find((x) => x.id === +b.dataset.id);
-      if (!c) return;
-      editingId = c.id;
-      $('formTitle').textContent = `Edit: ${c.name}`;
-      $('c_kind').value = c.kind; $('c_name').value = c.name; $('c_reg_no').value = c.reg_no;
-      $('c_vat_no').value = c.vat_no; $('c_email').value = c.email; $('c_phone').value = c.phone;
-      $('c_address').value = c.address;
-      $('cancelEdit').style.display = 'inline-block';
-      $('contactForm').scrollIntoView({ behavior: 'smooth' });
-    });
-    $('contactList').querySelectorAll('.cdel').forEach((b) => b.onclick = async () => {
-      if (confirm('Delete this contact? Documents already written keep the name.')) {
-        await api('/api/contacts?id=' + b.dataset.id, 'DELETE');
-        load();
-      }
-    });
+  async function api(path, opts) {
+    const r = await fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}));
+    let data = {};
+    try { data = await r.json(); } catch {}
+    if (!r.ok) throw new Error(data.error || 'Request failed');
+    return data;
+  }
+  const post = (p, body) => api(p, { method: 'POST', body: JSON.stringify(body || {}) });
+  const patch = (p, body) => api(p, { method: 'PATCH', body: JSON.stringify(body || {}) });
+  const del = (p) => api(p, { method: 'DELETE' });
+
+  const LOGO = '<svg width="34" height="34" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14" fill="#0f766e"/><text x="16" y="22" font-family="Georgia,serif" font-size="17" font-weight="bold" fill="#ffffff" text-anchor="middle">V</text></svg>';
+  const BRAND = '<div style="display:flex;align-items:center;gap:10px">' + LOGO +
+    '<div><div style="font-size:19px;font-weight:700;letter-spacing:.3px;color:inherit">Verdins</div>' +
+    '<div class="muted" style="font-size:12px;letter-spacing:2px;color:inherit;opacity:.8">ACCOUNTING</div></div></div>';
+
+  function showErr(box, msg) { box.innerHTML = '<div class="error-line">' + esc(msg) + '</div>'; }
+
+  // ---------- auth screens ----------
+  function viewLogin(mode) {
+    mode = mode || 'login';
+    app.innerHTML = `
+    <div class="auth">
+      <div class="card" style="max-width:420px;margin:auto">
+        ${BRAND}
+        <h2 style="margin-top:16px">${mode === 'login' ? 'Welcome back' : 'Create a company workspace'}</h2>
+        <p class="muted">${mode === 'login' ? 'Sign in to your company workspace' : 'One workspace for your whole company'}</p>
+        <form id="authForm">
+          ${mode === 'register' ? `
+          <label>Company name<br><input id="fCompany" required maxlength="200" style="width:100%"></label><br>
+          <label>Your name<br><input id="fName" required maxlength="100" style="width:100%"></label><br>` : ''}
+          <label>Email<br><input id="fEmail" type="email" required style="width:100%"></label><br>
+          <label>Password<br><input id="fPass" type="password" required minlength="8" style="width:100%"></label><br>
+          <button class="btn" style="width:100%;margin-top:8px">${mode === 'login' ? 'Sign in' : 'Create workspace'}</button>
+        </form>
+        <div id="authErr"></div>
+        <p style="margin-top:14px"><a href="#" id="authSwitch">${mode === 'login' ? 'New company? Create one' : 'Already have an account? Sign in'}</a></p>
+      </div>
+    </div>`;
+    $('authSwitch').onclick = (e) => { e.preventDefault(); viewLogin(mode === 'login' ? 'register' : 'login'); };
+    $('authForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const err = $('authErr');
+      err.innerHTML = '';
+      try {
+        if (mode === 'login') {
+          const r = await post('/api/login', { email: $('fEmail').value.trim(), password: $('fPass').value });
+          if (r.mfaRequired) return viewMfa();
+          await enterApp();
+        } else {
+          await post('/api/register', {
+            companyName: $('fCompany').value.trim(), name: $('fName').value.trim(),
+            email: $('fEmail').value.trim(), password: $('fPass').value,
+          });
+          await post('/api/login', { email: $('fEmail').value.trim(), password: $('fPass').value });
+          await enterApp();
+        }
+      } catch (ex) { showErr(err, ex.message); }
+    };
   }
 
-  $('cq').addEventListener('input', () => { q = $('cq').value.trim(); load(); });
-  $('clearQ').onclick = () => { q = ''; $('cq').value = ''; load(); };
-  $('cancelEdit').onclick = () => {
-    editingId = null; $('contactForm').reset();
-    $('formTitle').textContent = 'Add new contact';
-    $('cancelEdit').style.display = 'none';
-  };
-  $('contactForm').onsubmit = async (e) => {
-    e.preventDefault();
-    try {
-      const data = {
-        kind: $('c_kind').value, name: $('c_name').value, reg_no: $('c_reg_no').value,
-        vat_no: $('c_vat_no').value, email: $('c_email').value, phone: $('c_phone').value,
-        address: $('c_address').value,
-      };
-      if (editingId) await api('/api/contacts', 'PATCH', { id: editingId, ...data });
-      else await api('/api/contacts', 'POST', data);
-      $('cancelEdit').click();
-      load();
-    } catch (err) { showError(err.message); }
-  };
-  $('importFile').onchange = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    $('importMsg').textContent = 'Reading file…';
-    try {
-      await loadXlsx();
-      const buf = await file.arrayBuffer();
-      const wb = XLSX.read(buf, { type: 'array' });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
-      const pick = (r, keys) => {
-        for (const k of Object.keys(r)) {
-          const lk = String(k).toLowerCase();
-          if (keys.some((t) => lk === t || lk.includes(t))) return String(r[k] ?? '').trim();
-        }
-        return '';
-      };
-      const contacts = [];
-      for (const r of rows) {
-        const name = pick(r, ['name', 'nosaukums', 'company', 'klient', 'piegād', 'supplier']);
-        if (!name) continue;
-        let kind = pick(r, ['kind', 'veids', 'type', 'tips']).toLowerCase();
-        kind = kind.includes('supplier') || kind.includes('piegād') ? 'supplier' : 'company';
-        contacts.push({
-          kind, name,
-          reg_no: pick(r, ['reg', 'reģ', 'registration']),
-          vat_no: pick(r, ['vat', 'pvn']),
-          email: pick(r, ['email', 'e-pasts', 'mail']),
-          phone: pick(r, ['phone', 'telef', 'tel']),
-          address: pick(r, ['address', 'adres', 'adrese']),
-        });
-      }
-      if (!contacts.length) { $('importMsg').textContent = 'No contacts found — is there a "Name" column?'; return; }
-      const res = await api('/api/contacts/import', 'POST', { contacts });
-      $('importMsg').textContent = `Added ${res.added} contact(s), ${contacts.length - res.added} already existed.`;
-      load();
-    } catch (err) { $('importMsg').textContent = ''; showError(err.message); }
-    e.target.value = '';
-  };
-  $('exportCsv').onclick = async () => {
-    try {
-      const list = await api('/api/contacts');
-      const escCsv = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-      const lines = ['Name,Kind,Registration no.,VAT no.,Email,Phone,Address'];
-      for (const c of list) lines.push([c.name, c.kind, c.reg_no, c.vat_no, c.email, c.phone, c.address].map(escCsv).join(','));
-      const a = document.createElement('a');
-      a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(lines.join('\n'));
-      a.download = 'contacts.csv';
-      a.click();
-    } catch (err) { showError(err.message); }
-  };
-  load().catch((e) => showError(e.message));
-}
-
-function viewSettings(me) {
-  appShell(me, 'settings', `
-    <div class="topline"><h1>Settings</h1><span class="company-chip">🏢 ${esc(me.company)}</span></div>
-    <div class="card">
-      <h2>🌐 Language / Valoda</h2>
-      <p class="sub">Choose the language of the whole program — menus, documents and printed invoices. Default is English. / Izvēlieties valodu visai programmai — izvēlnes, dokumenti un izdrukas. Pēc noklusējuma — angļu.</p>
-      <select id="langSel" style="max-width:280px"></select>
-    </div>
-    <div class="card">
-      <h2>💾 Backups</h2>
-      <p class="sub">Reda keeps everything (documents, contacts, scanned originals) in one database file. Set a folder here and Reda will save a full copy there every day — or click "Back up now" any time. Keep the 30 newest copies, older ones are removed automatically.</p>
-      <div class="form-row">
-        <div style="grid-column:1 / -1"><label>Backup folder (full path on the server)</label>
-          <input id="bkFolder" placeholder="/home/janis/reda-backups" style="max-width:420px"></div>
-        <div style="grid-column:1 / -1"><label style="display:flex;gap:.4rem;align-items:center"><input type="checkbox" id="bkAuto"> Save a fresh copy automatically every day</label></div>
-        <button class="btn small" id="bkSave" type="button">Save settings</button>
-        <button class="btn small" id="bkRun" type="button" style="display:none">Back up now</button>
-        <a class="btn small secondary" id="bkDl" href="/api/backup/download" style="display:none;text-decoration:none">Download backup file</a>
+  function viewMfa() {
+    app.innerHTML = `
+    <div class="auth">
+      <div class="card" style="max-width:420px;margin:auto">
+        ${BRAND}
+        <h2 style="margin-top:16px">Two-step verification</h2>
+        <p class="muted">Enter the 6-digit code from your app</p>
+        <form id="mfaForm">
+          <input id="fCode" inputmode="numeric" pattern="[0-9]*" maxlength="6" required style="width:160px;font-size:20px;letter-spacing:4px;text-align:center"><br><br>
+          <button class="btn" style="width:100%">Verify</button>
+        </form>
+        <div id="mfaErr"></div>
       </div>
-      <p class="sub" id="bkMsg"></p>
-      <div id="bkFiles"></div>
-    </div>
-    <div class="card">
-      <h2>Two-step verification (Microsoft Authenticator)</h2>
-      <p class="sub" id="mfaStatus">${me.mfaEnabled
-        ? '✅ Enabled — every login also asks for a 6-digit code from Microsoft Authenticator.'
-        : '⚠️ Not enabled yet. Add a second factor so a stolen password alone can’t open your books.'}</p>
-      <div class="error-msg" id="err"></div>
-      <div id="mfaAction">
-        ${me.mfaEnabled
-          ? `<form id="disForm"><p class="steps">To disable, confirm a current code:</p><input id="code" maxlength="6" inputmode="numeric" placeholder="6-digit code" required> <button class="btn small secondary" type="submit">Disable MFA</button></form>`
-          : `<button class="btn small" id="setupBtn">Set up Microsoft Authenticator</button>`}
-      </div>
-    </div>
-    <div class="card">
-      <h2>🏢 Company details & logo (used on printouts)</h2>
-      <p class="sub">These details and your logo appear automatically on every invoice/offer PDF you print.</p>
-      <div id="logoBox" style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap">
-        <div id="logoPreview" style="min-width:100px;min-height:50px;border:1px dashed var(--border);border-radius:10px;padding:.5rem;display:flex;align-items:center;justify-content:center;background:#fff"></div>
-        <input type="file" id="logoFile" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" hidden>
-        <button class="btn small secondary" id="logoBtn" type="button">📤 Upload logo</button>
-        <button class="btn small secondary" id="logoDel" type="button" style="display:none">🗑 Remove logo</button>
-      </div>
-      <form id="coForm" class="form-row">
-        <div style="grid-column:1 / -1"><label>Address</label><input id="co_address" placeholder="Street, city, postal code, country"></div>
-        <div><label>Registration no.</label><input id="co_reg_no" placeholder="40001234567"></div>
-        <div><label>VAT (PVN) no.</label><input id="co_vat_no" placeholder="LV40001234567"></div>
-        <div style="grid-column:1 / -1"><label>Bank accounts (you can add more than one)</label>
-          <div id="bankList" style="display:grid;gap:.5rem"></div>
-          <button type="button" class="btn small secondary" id="addBankBtn" style="margin-top:.4rem">+ Add bank account</button>
-        </div>
-        <div><label>Phone</label><input id="co_phone" placeholder="+371 20000000"></div>
-        <div><label>Email</label><input id="co_email" type="email" placeholder="info@yourcompany.lv"></div>
-        <button class="btn small" type="submit" style="grid-column:1 / -1">Save company details</button>
-      </form>
-      <div id="coMsg" class="ok-msg"></div>
-    </div>
-    <div class="card">
-      <h2>🧪 Demo data for testing</h2>
-      <p class="sub">Adds <b>10 fake documents</b> (paid invoices, an overdue one, purchase bills, stock goods, an offer) so you can safely test searching, colors, stock and money totals. Your real documents are not touched.</p>
-      <button class="btn small" id="demoBtn" type="button">➕ Add 10 demo documents</button>
-      <span id="demoMsg" class="sub" style="margin-left:.6rem"></span>
-    </div>
-    <div class="card">
-      <h2>👥 People in your company (<span id="userCount">…</span>)</h2>
-      <p class="sub">Everyone in this list logs in with their own email and works in the same company workspace. Up to 10 people at the same time.</p>
-      <div id="userList"><p class="empty">Loading…</p></div>
-      <form id="addUserForm" class="form-row">
-        <div><label>Name</label><input id="u_name" required placeholder="Jānis Bērziņš"></div>
-        <div><label>Email</label><input id="u_email" type="email" required placeholder="janis@yourcompany.lv"></div>
-        <div><label>Password (min 8)</label><input id="u_password" type="password" required minlength="8" placeholder="••••••••"></div>
-        <div><label>Role</label><select id="u_role">
-          <option value="accountant">Accountant (sees documents & contacts)</option>
-          <option value="sales">Sales (writes documents)</option>
-          <option value="owner">Owner (full control)</option>
-        </select></div>
-        <button class="btn small" type="submit" style="grid-column:1 / -1">Add person</button>
-      </form>
-      <p class="sub" id="userNote">Give the person their password personally and ask them to keep it safe. They log in on the same login page with their own email and this password.</p>
-    </div>
-    <div class="card">
-      <h2>Company & account</h2>
-      <table>
-        <tr><td>Company</td><td><b>${esc(me.company)}</b></td></tr>
-        <tr><td>Your name</td><td>${esc(me.name)}</td></tr>
-        <tr><td>Email</td><td>${esc(me.email)}</td></tr>
-        <tr><td>Role</td><td>${esc(me.role)}</td></tr>
-      </table>
-      <p class="sub" style="margin-top:.8rem">This data belongs only to your company workspace. No other company — and no other user without access — can see it.</p>
-    </div>`);
-  if (me.mfaEnabled) {
-    document.getElementById('disForm').onsubmit = async (e) => {
+    </div>`;
+    $('fCode').focus();
+    $('mfaForm').onsubmit = async (e) => {
       e.preventDefault();
       try {
-        await api('/api/mfa/disable', 'POST', { code: code.value });
-        route();
-      } catch (err) { showError(err.message); }
+        await post('/api/mfa/verify', { code: $('fCode').value.trim() });
+        await enterApp();
+      } catch (ex) { showErr($('mfaErr'), ex.message); }
     };
-  } else {
-    document.getElementById('setupBtn').onclick = () => viewMfaSetup();
   }
 
-  // ---- language switch ----
-  const langSel = document.getElementById('langSel');
-  langSel.innerHTML = Object.entries(REDA_I18N.LANGS).map(([code, name]) =>
-    `<option value="${code}"${REDA_I18N.getLang() === code ? ' selected' : ''}>${name}</option>`).join('');
-  langSel.onchange = () => {
-    REDA_I18N.setLang(langSel.value);
-    document.documentElement.lang = langSel.value;
-    route(); // re-render the whole screen in the new language
-  };
-
-  // ---- backups ----
-  const bkMsg = document.getElementById('bkMsg');
-  const bkShow = (cfg) => {
-    document.getElementById('bkFolder').value = cfg.folder || '';
-    document.getElementById('bkAuto').checked = !!cfg.auto;
-    document.getElementById('bkRun').style.display = cfg.folder ? '' : 'none';
-    document.getElementById('bkDl').style.display = cfg.folder ? '' : 'none';
-    document.getElementById('bkFiles').innerHTML = (cfg.files || []).length
-      ? '<table><tr><th>File</th><th>Size</th><th>Created</th></tr>' +
-        cfg.files.map((f) => `<tr><td>${esc(f.name)}</td><td>${(f.size / 1024 / 1024).toFixed(1)} MB</td><td>${esc(f.created_at)}</td></tr>`).join('') + '</table>'
-      : '<p class="sub">No backups saved yet.</p>';
-  };
-  fetch('/api/backup').then((r) => r.json()).then((cfg) => bkShow(cfg)).catch(() => {});
-  document.getElementById('bkSave').onclick = async () => {
-    bkMsg.textContent = 'Saving…';
-    try {
-      const cfg = await api('/api/backup', 'POST', { folder: document.getElementById('bkFolder').value.trim(), auto: document.getElementById('bkAuto').checked });
-      bkMsg.textContent = 'Settings saved ✔';
-      bkShow(cfg);
-    } catch (e) { bkMsg.textContent = ''; showError(e.message); }
-  };
-  document.getElementById('bkRun').onclick = async () => {
-    bkMsg.textContent = 'Making backup…';
-    try {
-      const r = await api('/api/backup/run', 'POST', {});
-      bkMsg.textContent = 'Backup saved ✔ — ' + r.file;
-      bkShow(r);
-    } catch (e) { bkMsg.textContent = ''; showError(e.message); }
-  };
-
-  // ---- company details & logo ----
-  const coMsg = document.getElementById('coMsg');
-  const coSay = (text, bad = false) => {
-    coMsg.style.display = 'block';
-    coMsg.style.background = bad ? '#fef2f2' : '';
-    coMsg.style.borderColor = bad ? '#fecaca' : '';
-    coMsg.style.color = bad ? 'var(--red)' : '';
-    coMsg.textContent = text;
-  };
-  async function loadCompany() {
-    const p = await api('/api/company');
-    document.getElementById('co_address').value = p.address;
-    document.getElementById('co_reg_no').value = p.reg_no;
-    document.getElementById('co_vat_no').value = p.vat_no;
-    renderBanks(Array.isArray(p.banks) ? p.banks : []);
-    document.getElementById('co_phone').value = p.phone;
-    document.getElementById('co_email').value = p.email;
-    renderLogo(p.has_logo);
+  // ---------- app shell ----------
+  let me = null;
+  const NAV = [
+    ['dashboard', 'Dashboard'], ['documents', 'Documents'], ['contacts', 'Customers & suppliers'],
+    ['stock', 'My stock'], ['scans', 'Scanned originals'], ['settings', 'Settings'],
+  ];
+  function shell(content, active) {
+    app.innerHTML = `
+    <div class="shell">
+      <aside class="side">
+        ${BRAND}
+        <nav style="margin-top:24px">
+          ${NAV.map(([id, label]) => '<div style="margin:6px 0"><a href="#' + id + '" class="navlink' + (id === active ? ' active' : '') + '">' + T(label) + '</a></div>').join('')}
+        </nav>
+        <div style="margin-top:auto">
+          <div style="font-size:13px">${esc(me.company)}</div>
+          <div class="small" style="opacity:.7">${esc(me.email)}</div>
+          <button class="btn secondary small" id="navLogout" style="margin-top:8px">Log out</button>
+        </div>
+      </aside>
+      <main class="main">${content}</main>
+    </div>`;
+    $('navLogout').onclick = async () => { try { await post('/api/logout'); } catch {} me = null; viewLogin('login'); };
   }
-  // ---- multiple bank accounts (banking v9.4) ----
-  const renderBanks = (banks) => {
-    const box = document.getElementById('bankList');
-    box.innerHTML = banks.length ? banks.map((b, i) => `
-      <div class="bank-row" data-i="${i}" style="display:grid;grid-template-columns:1fr 2fr 1fr auto;gap:.4rem">
-        <input class="bk-name" placeholder="Bank name (e.g. Swedbank)" value="${esc(b.name || '')}">
-        <input class="bk-iban" placeholder="IBAN (LV12 BANK 0000 0000 0000)" value="${esc(b.iban || '')}">
-        <input class="bk-swift" placeholder="SWIFT/BIC (optional)" value="${esc(b.swift || '')}">
-        <button type="button" class="btn small secondary bk-del">🗑</button>
-      </div>`).join('') : '<p class="sub" style="margin:0">No bank accounts yet — add one so customers know where to pay.</p>';
-    box.querySelectorAll('.bk-del').forEach((btn) => btn.onclick = () => {
-      const cur = collectBanks();
-      cur.splice(+btn.closest('.bank-row').dataset.i, 1);
-      renderBanks(cur);
-    });
-  };
-  const collectBanks = () => Array.from(document.querySelectorAll('#bankList .bank-row')).map((row) => ({
-    name: row.querySelector('.bk-name').value.trim(),
-    iban: row.querySelector('.bk-iban').value.trim(),
-    swift: row.querySelector('.bk-swift').value.trim(),
-  })).filter((b) => b.name || b.iban);
-  document.getElementById('addBankBtn').onclick = () => {
-    const cur = collectBanks();
-    if (cur.length >= 5) return coSay('⚠️ Up to 5 bank accounts.', true);
-    cur.push({ name: '', iban: '', swift: '' });
-    renderBanks(cur);
-  };
-  function renderLogo(has) {
-    document.getElementById('logoDel').style.display = has ? 'inline-block' : 'none';
-    document.getElementById('logoPreview').innerHTML = has
-      ? `<img src="/api/company/logo?${Date.now()}" alt="Company logo" style="max-height:60px;max-width:180px">`
-      : '<span class="sub" style="font-size:.8rem">No logo yet</span>';
-  }
-  document.getElementById('logoBtn').onclick = () => document.getElementById('logoFile').click();
-  document.getElementById('logoFile').onchange = async (e) => {
-    const file = e.target.files[0];
-    e.target.value = '';
-    if (!file) return;
-    coSay('Uploading logo…');
-    try {
-      const dataUrl = await new Promise((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => resolve(r.result);
-        r.onerror = reject;
-        r.readAsDataURL(file);
-      });
-      await api('/api/company/logo', 'POST', { data: dataUrl });
-      coSay('✅ Logo saved — it will appear on every printout.');
-      renderLogo(true);
-    } catch (err) { coSay(`⚠️ ${err.message}`, true); }
-  };
-  document.getElementById('logoDel').onclick = async () => {
-    await api('/api/company/logo', 'DELETE');
-    coSay('Logo removed.');
-    renderLogo(false);
-  };
-  document.getElementById('coForm').onsubmit = async (e) => {
-    e.preventDefault();
-    try {
-      await api('/api/company', 'POST', {
-        address: document.getElementById('co_address').value,
-        reg_no: document.getElementById('co_reg_no').value,
-        vat_no: document.getElementById('co_vat_no').value,
-        banks: collectBanks(),
-        phone: document.getElementById('co_phone').value,
-        email: document.getElementById('co_email').value,
-      });
-      coSay('✅ Company details saved.');
-    } catch (err) { coSay(`⚠️ ${err.message}`, true); }
-  };
-  // ---- demo data (10 fake documents) ----
-  document.getElementById('demoBtn').onclick = async () => {
-    const msg = document.getElementById('demoMsg');
-    msg.textContent = 'Adding…';
-    try {
-      await api('/api/demo', 'POST', {});
-      msg.textContent = '✅ 10 demo documents added — open the dashboard to see them.';
-    } catch (err) { msg.textContent = `⚠️ ${err.message}`; }
-  };
-  loadCompany().catch(() => {});
 
-  // ---- people in my company (max 10) ----
-  async function loadUsers() {
-    const { users, max } = await api('/api/users');
-    document.getElementById('userCount').textContent = `${users.length} of ${max}`;
-    const meId = me.email;
-    document.getElementById('userList').innerHTML = `
-      <table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>MFA</th><th></th></tr></thead>
-      <tbody>${users.map((u) => `
+  // ---------- dashboard ----------
+  async function viewDashboard() {
+    const { invoices } = await api('/api/invoices');
+    const month = new Date().toISOString().slice(0, 7);
+    const whoOwes = invoices.filter((i) => i.doc_type === 'invoice' && (i.status === 'sent' || i.status === 'partial' || i.status === 'draft') && (i.amount_cents - i.paid_cents) > 0);
+    const youOwe = invoices.filter((i) => i.doc_type === 'bill' && i.status !== 'paid' && (i.amount_cents - i.paid_cents) > 0);
+    const sum = (list) => list.reduce((a, i) => a + i.amount_cents - i.paid_cents, 0);
+    const unpaid = whoOwes.concat(youOwe);
+    shell(`
+      <h1>Dashboard</h1>
+      <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:16px">
+        <div class="kpi"><div class="muted">Who owes you</div><div style="font-size:24px;font-weight:700;margin-top:6px">€ ${money(sum(whoOwes))}</div></div>
+        <div class="kpi"><div class="muted">You owe suppliers</div><div style="font-size:24px;font-weight:700;margin-top:6px">€ ${money(sum(youOwe))}</div></div>
+        <div class="kpi"><div class="muted">Documents this month</div><div style="font-size:24px;font-weight:700;margin-top:6px">${invoices.filter((i) => (i.issue_date || '').startsWith(month)).length}</div></div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h2>Unpaid documents</h2>
+        ${unpaid.length ? `<table><thead><tr><th>Number</th><th>Customer</th><th>Amount</th><th>Due date</th></tr></thead><tbody>
+          ${unpaid.slice(0, 12).map((i) => {
+            const overdue = i.due_date && i.due_date < today();
+            return '<tr class="' + (overdue ? 'overdue' : '') + '"><td><a href="#documents?d=' + i.id + '">' + esc(i.number) + '</a></td><td>' + esc(i.customer) + '</td><td>€ ' + money(i.amount_cents - i.paid_cents) + '</td><td>' + esc(i.due_date || '—') + '</td></tr>';
+          }).join('')}</tbody></table>` : '<p class="muted">No unpaid documents yet</p>'}
+      </div>
+    `, 'dashboard');
+  }
+
+  // ---------- documents list ----------
+  async function viewDocuments(query) {
+    const { invoices } = await api('/api/invoices');
+    const q = (query.q || '').toLowerCase();
+    const type = query.type || '';
+    const sort = query.sort || 'new';
+    let list = invoices.slice();
+    if (q) list = list.filter((i) => (i.number + ' ' + i.customer + ' ' + (i.description || '')).toLowerCase().includes(q));
+    if (type) list = list.filter((i) => i.doc_type === type);
+    const cmp = {
+      new: (a, b) => b.id - a.id, old: (a, b) => a.id - b.id,
+      big: (a, b) => b.amount_cents - a.amount_cents, small: (a, b) => a.amount_cents - b.amount_cents,
+      due: (a, b) => String(a.due_date || '9999').localeCompare(String(b.due_date || '9999')),
+    }[sort] || ((a, b) => b.id - a.id);
+    list.sort(cmp);
+    const badge = (i) => {
+      let s = i.status;
+      if (i.doc_type === 'invoice' && s !== 'paid' && s !== 'draft' && i.due_date && i.due_date < today() && i.amount_cents > i.paid_cents) s = 'overdue';
+      return '<span class="badge b-' + s + '">' + T(s.charAt(0).toUpperCase() + s.slice(1)) + '</span>';
+    };
+    shell(`
+      <h1>Documents</h1>
+      <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:14px">
+        <input id="docSearch" placeholder="${T('Search documents')}" value="${esc(query.q || '')}" style="min-width:220px">
+        <select id="docType">
+          <option value="">${T('All types')}</option>
+          <option value="invoice" ${type === 'invoice' ? 'selected' : ''}>${T('Invoices')}</option>
+          <option value="quote" ${type === 'quote' ? 'selected' : ''}>${T('Quotes')}</option>
+          <option value="bill" ${type === 'bill' ? 'selected' : ''}>${T('Bills (purchases)')}</option>
+          <option value="cmr" ${type === 'cmr' ? 'selected' : ''}>${T('CMR waybills')}</option>
+        </select>
+        <select id="docSort">
+          <option value="new" ${sort === 'new' ? 'selected' : ''}>${T('Newest first')}</option>
+          <option value="old" ${sort === 'old' ? 'selected' : ''}>${T('Oldest first')}</option>
+          <option value="big" ${sort === 'big' ? 'selected' : ''}>${T('Amount largest → smallest')}</option>
+          <option value="small" ${sort === 'small' ? 'selected' : ''}>${T('Amount smallest → largest')}</option>
+          <option value="due" ${sort === 'due' ? 'selected' : ''}>${T('Due soonest')}</option>
+        </select>
+        <span style="flex:1"></span>
+        <button class="btn" id="btnNewInv">New invoice</button>
+        <button class="btn secondary" id="btnNewQuo">New quote</button>
+        <button class="btn secondary" id="btnNewBill">New bill</button>
+        <button class="btn secondary" id="btnNewCmr">New CMR</button>
+      </div>
+      ${list.length ? `<div class="card" style="margin-top:14px"><table>
+        <thead><tr><th>Number</th><th>${T('Status')}</th><th>${T('Customer')}</th><th>${T('Amount')}</th><th>${T('Issue date')}</th><th>${T('Due date')}</th></tr></thead>
+        <tbody>${list.map((i) => '<tr><td><a href="#documents?d=' + i.id + '">' + esc(i.number) + '</a></td><td>' + badge(i) + '</td><td>' + esc(i.customer) + '</td><td>€ ' + money(i.amount_cents) + (i.paid_cents && i.paid_cents < i.amount_cents ? ' <span class="muted small">(' + T('Paid').toLowerCase() + ' € ' + money(i.paid_cents) + ')</span>' : '') + '</td><td>' + esc(fmD(i.issue_date)) + '</td><td>' + esc(i.due_date || '—') + '</td></tr>').join('')}</tbody>
+      </table></div>` : '<p class="muted" style="margin-top:16px">' + T('Nothing here yet') + '</p>'}
+    `, 'documents');
+    const go = () => { location.hash = '#documents?' + new URLSearchParams({ q: $('docSearch').value, type: $('docType').value, sort: $('docSort').value }).toString(); };
+    $('docSearch').oninput = (() => { let t; return () => { clearTimeout(t); t = setTimeout(go, 250); }; })();
+    $('docType').onchange = go; $('docSort').onchange = go;
+    $('btnNewInv').onclick = () => viewDoc('invoice');
+    $('btnNewQuo').onclick = () => viewDoc('quote');
+    $('btnNewBill').onclick = () => viewDoc('bill');
+    $('btnNewCmr').onclick = () => viewDoc('cmr');
+  }
+
+  // ---------- one document (view / edit) ----------
+  async function viewDoc(docType, id) {
+    const isNew = !id;
+    let doc = null;
+    const [{ contacts }, company] = await Promise.all([api('/api/contacts'), api('/api/company')]);
+    if (!isNew) doc = await api('/api/invoices/' + id);
+    else doc = {
+      doc_type: docType, items: [], status: 'draft', issue_date: today(), due_date: '',
+      vat_rate: 21, amount: 0, customer: '', description: '', bank_id: null, contact_id: null,
+      scan_warn: 0, cmr_carrier: '', cmr_dispatch: '', cmr_delivery: '', cmr_weight: '', cmr_packages: '',
+    };
+    const isCmr = doc.doc_type === 'cmr';
+    const typeLabel = { invoice: 'Invoice', quote: 'Quote', bill: 'Bill', cmr: 'CMR' }[doc.doc_type];
+    shell(`
+      <div class="row"><a href="#documents">← ${T('Documents')}</a></div>
+      <h1 style="margin-top:10px">${isNew ? T('New document') : esc(doc.number) + ' — ' + T(typeLabel)}</h1>
+      ${doc.scan_warn ? '<div class="warn-box">' + T('The amount on this document looks unusual — please check') + '</div>' : ''}
+      <div class="card" style="margin-top:14px">
+        <div class="grid" style="gap:10px">
+          <label>${isCmr ? T('Consignee') : T('Customer')}<br><input id="fCustomer" list="contactList" value="${esc(doc.customer)}" style="width:100%"></label>
+          <datalist id="contactList">${contacts.map((c) => '<option value="' + esc(c.name) + '">').join('')}</datalist>
+          <label>${isCmr ? T('Goods') : T('Description')}<br><input id="fDesc" value="${esc(doc.description || '')}" style="width:100%"></label>
+          <label>${T('Issue date')}<br><input id="fIssue" type="date" value="${esc(doc.issue_date || today())}"></label>
+          <label>${isCmr ? T('Place of delivery') : T('Due date')}<br><input id="fDue" type="date" value="${esc(doc.due_date || '')}"></label>
+          ${isCmr ? `
+          <label>${T('Carrier')}<br><input id="fCarrier" value="${esc(doc.cmr_carrier || '')}" style="width:100%"></label>
+          <label>${T('Place of dispatch')}<br><input id="fDispatch" value="${esc(doc.cmr_dispatch || '')}" style="width:100%"></label>
+          <label>${T('Number of packages')}<br><input id="fPackages" value="${esc(doc.cmr_packages || '')}"></label>
+          <label>${T('Gross weight (kg)')}<br><input id="fWeight" value="${esc(doc.cmr_weight || '')}"></label>` : `
+          <label>VAT %<br><input id="fVat" type="number" step="0.5" min="0" max="100" value="${esc(doc.vat_rate ?? 21)}"></label>
+          ${doc.doc_type === 'invoice' && (company.company.banks || []).length ? `
+          <label>${T('Bank account on printout')}<br><select id="fBank" style="width:100%">
+            <option value="">—</option>
+            ${(company.company.banks).map((b) => '<option value="' + (b.id ?? b.iban) + '"' + (String(doc.bank_id) === String(b.id ?? b.iban) ? ' selected' : '') + '>' + esc(b.name || '') + ' · ' + esc(b.iban) + '</option>').join('')}
+          </select></label>` : ''}`}
+        </div>
+        ${isCmr ? '' : `
+        <h2 style="margin-top:18px">${T('Line items')}</h2>
+        <table id="itemsTable"><thead><tr><th style="width:45%">${T('Item')}</th><th>${T('Qty')}</th><th>${T('Unit price')}</th><th>${T('Sum')}</th><th></th></tr></thead>
+        <tbody id="itemsBody"></tbody></table>
+        <button class="btn secondary small" id="btnAddLine">Add line</button>
+        <div style="margin-top:14px;font-weight:600">Total: <span id="totalOut">€ 0.00</span></div>`}
+        <div class="row" style="margin-top:18px;flex-wrap:wrap">
+          <button class="btn" id="btnSave">Save</button>
+          ${isNew ? '' : '<button class="btn secondary" id="btnPrint">Print</button>'}
+          ${!isNew && doc.doc_type === 'invoice' ? '<button class="btn secondary" id="btnGenCmr">' + T('Generate CMR') + '</button>' : ''}
+          ${isNew ? '' : '<span style="flex:1"></span><button class="btn danger" id="btnDelete">Delete</button>'}
+        </div>
+        <div id="docErr"></div>
+      </div>
+      <div id="docExtra"></div>
+    `, 'documents');
+    const items = isCmr ? [] : (doc.items && doc.items.length ? doc.items : []).map((x) => ({ name: x.name || '', qty: Number(x.qty) || 0, price: Number(x.price) || 0 }));
+    function recalc() {
+      const total = items.reduce((a, x) => a + x.qty * x.price, 0);
+      $('totalOut').textContent = '€ ' + total.toFixed(2);
+    }
+    function renderItems() {
+      $('itemsBody').innerHTML = items.map((x, idx) => `
         <tr>
-          <td><b>${esc(u.name)}</b>${u.email === meId ? ' <span class="sub">(you)</span>' : ''}</td>
-          <td>${esc(u.email)}</td>
-          <td>${esc(u.role)}</td>
-          <td>${u.mfa_enabled ? '✅' : '—'}</td>
-          <td class="actions">${u.email !== meId ? `<button data-id="${u.id}" data-name="${esc(u.name)}" class="udel danger">Remove</button>` : ''}</td>
-        </tr>`).join('')}</tbody></table>
-      ${users.length >= max ? '<p class="sub">⚠️ You have reached the 10-user limit for your company.</p>' : ''}`;
-    document.getElementById('userList').querySelectorAll('.udel').forEach((b) => b.onclick = async () => {
-      if (confirm(`Remove ${b.dataset.name}? They will be logged out and lose access.`)) {
-        try { await api('/api/users?id=' + b.dataset.id, 'DELETE'); loadUsers(); }
-        catch (err) { showError(err.message); }
-      }
+          <td><input data-i="${idx}" data-f="name" value="${esc(x.name)}" style="width:100%"></td>
+          <td><input data-i="${idx}" data-f="qty" type="number" step="any" min="0" value="${esc(x.qty)}" style="width:80px"></td>
+          <td><input data-i="${idx}" data-f="price" type="number" step="any" min="0" value="${esc(x.price)}" style="width:110px"></td>
+          <td id="lineSum${idx}">€ ${(x.qty * x.price).toFixed(2)}</td>
+          <td>${items.length > 1 ? '<button class="btn danger small" data-del="' + idx + '">✕</button>' : ''}</td>
+        </tr>`).join('') || '<tr><td colspan="5" class="muted">—</td></tr>';
+      $('itemsBody').querySelectorAll('input[data-i]').forEach((inp) => {
+        inp.oninput = () => {
+          const i = +inp.dataset.i;
+          items[i][inp.dataset.f] = inp.dataset.f === 'name' ? inp.value : Number(inp.value) || 0;
+          $('lineSum' + i).textContent = '€ ' + (items[i].qty * items[i].price).toFixed(2);
+          recalc();
+        };
+      });
+      $('itemsBody').querySelectorAll('button[data-del]').forEach((b) => {
+        b.onclick = () => { items.splice(+b.dataset.del, 1); renderItems(); recalc(); };
+      });
+      recalc();
+    }
+    if (!isCmr) {
+      $('btnAddLine').onclick = () => { items.push({ name: '', qty: 1, price: 0 }); renderItems(); };
+      renderItems();
+    }
+
+    const payload = () => {
+      const total = items.reduce((a, x) => a + x.qty * x.price, 0);
+      return {
+        doc_type: doc.doc_type, customer: $('fCustomer').value.trim(), description: $('fDesc').value,
+        issue_date: $('fIssue').value, due_date: $('fDue').value,
+        amount: isCmr ? (Number(doc.amount_cents ? doc.amount_cents / 100 : 0) || 0) : total,
+        items: isCmr ? (doc.items || []) : items,
+        bank_id: $('fBank') ? $('fBank').value || null : null,
+        cmr_carrier: $('fCarrier') ? $('fCarrier').value : '',
+        cmr_dispatch: $('fDispatch') ? $('fDispatch').value : '',
+        cmr_packages: $('fPackages') ? $('fPackages').value : '',
+        cmr_weight: $('fWeight') ? $('fWeight').value : '',
+      };
+    };
+    $('btnSave').onclick = async () => {
+      const err = $('docErr'); err.innerHTML = '';
+      try {
+        if (isNew) {
+          const r = await post('/api/invoices', payload());
+          location.hash = '#documents?d=' + r.id;
+        } else {
+          await patch('/api/invoices/' + id, payload());
+          alert(T('Document saved'));
+        }
+      } catch (ex) { showErr(err, ex.message); }
+    };
+    if (!isNew) {
+      $('btnPrint').onclick = () => (isCmr ? printCmr(doc.id) : printDoc(doc.id));
+      $('btnDelete').onclick = async () => {
+        if (!confirm(T('Delete document?'))) return;
+        await del('/api/invoices/' + id);
+        location.hash = '#documents';
+      };
+      if ($('btnGenCmr')) $('btnGenCmr').onclick = () => generateCmr(doc);
+      renderDocExtra(doc);
+    }
+  }
+
+  // "Generate CMR" from an invoice: creates a linked CMR waybill with the invoice data
+  async function generateCmr(invoice) {
+    try {
+      const goods = (invoice.items || []).map((x) => x.name).join(', ') || invoice.description || '';
+      const packages = String((invoice.items || []).reduce((a, x) => a + (Number(x.qty) || 0), 0) || '');
+      const r = await post('/api/invoices', {
+        doc_type: 'cmr', customer: invoice.customer, description: goods,
+        items: invoice.items || [], amount: invoice.amount_cents / 100,
+        cmr_packages: packages,
+        issue_date: today(),
+      });
+      alert(T('CMR consignment note') + ' ' + r.number + ' ' + T('Created').toLowerCase() + '.');
+      await printCmr(r.id);
+    } catch (ex) { alert(ex.message); }
+  }
+
+  // payments + scan panel for an existing document
+  async function renderDocExtra(doc) {
+    const box = $('docExtra');
+    const full = await api('/api/invoices/' + doc.id);
+    const isCmr = doc.doc_type === 'cmr';
+    box.innerHTML = `
+      <div class="grid" style="grid-template-columns:1fr 1fr;gap:14px;margin-top:14px">
+        <div class="card">
+          <h2>${T('Payments')}</h2>
+          ${doc.doc_type === 'quote' || isCmr ? '<p class="muted">' + T('Quotes are not paid') + '</p>' : `
+          <table><tbody>${(full.payments || []).map((p) => '<tr><td>' + esc(p.paid_on) + '</td><td>€ ' + money(p.amount_cents) + '</td><td class="muted">' + esc(p.note || '') + '</td><td><button class="btn danger small" data-pay="' + p.id + '">✕</button></td></tr>').join('') || '<tr><td class="muted">—</td></tr>'}</tbody></table>
+          <div class="row" style="margin-top:10px;gap:8px">
+            <input id="payAmt" type="number" step="any" min="0" placeholder="${T('Payment amount')}">
+            <input id="payDate" type="date" value="${today()}">
+            <button class="btn small" id="btnPay">${T('Record payment')}</button>
+          </div>`}
+        </div>
+        <div class="card">
+          <h2>${T('Scanned originals')}</h2>
+          <div class="scan-box">
+            <label class="btn secondary small" for="scanInput">${T('Link scan')}</label>
+            <input type="file" id="scanInput" accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv">
+            <span class="muted small" id="scanMsg"></span>
+          </div>
+          <div id="scanList" style="margin-top:10px"></div>
+        </div>
+      </div>`;
+    box.querySelectorAll('button[data-pay]').forEach((b) => {
+      b.onclick = async () => { await del('/api/payments/' + b.dataset.pay); viewDoc(doc.doc_type, doc.id); };
+    });
+    const payBtn = $('btnPay');
+    if (payBtn) payBtn.onclick = async () => {
+      try {
+        await post('/api/invoices/payments', { invoice_id: doc.id, amount: $('payAmt').value, paid_on: $('payDate').value, note: '' });
+        viewDoc(doc.doc_type, doc.id);
+      } catch (ex) { alert(ex.message); }
+    };
+    renderScanList(doc);
+    $('scanInput').onchange = () => handleScanInput($('scanInput'), doc);
+  }
+
+  async function renderScanList(doc) {
+    const { scans } = await api('/api/scans');
+    const mine = scans.filter((s) => s.doc_number === doc.number);
+    const list = $('scanList');
+    if (!list) return;
+    list.innerHTML = mine.length ? mine.map((s) => `
+      <div class="row" style="padding:6px 0;border-bottom:1px solid var(--line)">
+        <a href="/api/scans/${s.id}" target="_blank">${esc(s.filename)}</a>
+        <span style="flex:1"></span>
+        <button class="btn danger small" data-scan="${s.id}">Delete</button>
+      </div>`).join('') : '<p class="muted small">' + T('Not linked') + '</p>';
+    list.querySelectorAll('button[data-scan]').forEach((b) => {
+      b.onclick = async () => {
+        await api('/api/scans', { method: 'DELETE', body: JSON.stringify({ id: +b.dataset.scan }) });
+        renderScanList(doc);
+      };
     });
   }
-  document.getElementById('addUserForm').onsubmit = async (e) => {
-    e.preventDefault();
+
+  // scan upload: images/PDF stored as-is; Excel/CSV parsed with SheetJS
+  async function handleScanInput(input, doc) {
+    const f = input.files[0];
+    if (!f) return;
+    const msg = $('scanMsg');
+    msg.textContent = T('Scanning…');
     try {
-      await api('/api/users', 'POST', {
-        name: document.getElementById('u_name').value,
-        email: document.getElementById('u_email').value,
-        password: document.getElementById('u_password').value,
-        role: document.getElementById('u_role').value,
-      });
-      e.target.reset();
-      loadUsers();
-    } catch (err) { showError(err.message); }
+      if (/\.(xlsx|xls|csv)$/i.test(f.name)) {
+        const XLSX = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.mini.mjs');
+        const buf = await f.arrayBuffer();
+        const wb = XLSX.read(buf);
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 });
+        await parseSheet(rows, doc);
+      } else {
+        const dataUrl = await new Promise((res, rej) => {
+          const r = new FileReader();
+          r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f);
+        });
+        if (/\.pdf$/i.test(f.name) || dataUrl.startsWith('data:application/pdf')) {
+          await post('/api/scans', { filename: f.name, data: dataUrl, doc_number: doc ? doc.number : null });
+          msg.textContent = T('Scan saved and linked');
+          if (doc) renderScanList(doc);
+        } else {
+          const text = await runOcr(dataUrl);
+          await post('/api/scans', { filename: f.name, data: dataUrl, doc_number: doc ? doc.number : null });
+          await parseDocText(text, doc);
+          msg.textContent = T('Scan saved and linked');
+          if (doc) renderScanList(doc);
+        }
+      }
+    } catch (ex) { msg.textContent = T('Could not read the file'); }
+    input.value = '';
+  }
+  async function runOcr(dataUrl) {
+    const mod = await import('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.esm.min.js');
+    const { createWorker } = mod;
+    const worker = await createWorker('eng');
+    const { data } = await worker.recognize(dataUrl);
+    await worker.terminate();
+    return data.text || '';
+  }
+  const amtRe = /(?:total|amount|summa|kopā|betrag|montant|totale|importe|razem)[^0-9]{0,20}([0-9][0-9 .,]{1,12})/i;
+  function findAmount(text) {
+    const m = text.match(amtRe);
+    if (!m) return null;
+    let s = m[1].trim().replace(/ /g, '');
+    if (/,\d{2}$/.test(s)) s = s.replace(/\./g, '').replace(',', '.');
+    else s = s.replace(/,/g, '');
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+  async function parseDocText(text, doc) {
+    const amount = findAmount(text);
+    if (amount == null) return;
+    if (doc) {
+      const big = amount > 10000;
+      await patch('/api/invoices/' + doc.id, { amount, scan_warn: big ? 1 : 0 });
+      alert(T('Amount found on the scan') + ': € ' + amount.toFixed(2) + (big ? '\n\n' + T('Large amount — please check the document') : ''));
+      viewDoc(doc.doc_type, doc.id);
+    } else {
+      alert(T('Amount found on the scan') + ': € ' + amount.toFixed(2));
+    }
+  }
+  async function parseSheet(rows, doc) {
+    if (!rows.length) return;
+    const head = rows[0].map((h) => String(h || '').toLowerCase().trim());
+    const idx = (names) => head.findIndex((h) => names.some((n) => h === n || h.startsWith(n)));
+    const iName = idx(['item', 'description', 'nosaukums', 'prece']);
+    const iQty = idx(['qty', 'quantity', 'daudzums', 'skaits']);
+    const iPrice = idx(['price', 'unit price', 'cena', 'vienības cena']);
+    if (iName < 0) return;
+    const items = [];
+    for (let r = 1; r < rows.length && items.length < 100; r++) {
+      const name = String(rows[r][iName] || '').trim();
+      if (!name) continue;
+      items.push({ name, qty: Number(rows[r][iQty]) || 1, price: Number(rows[r][iPrice]) || 0 });
+    }
+    if (!items.length) return;
+    const total = items.reduce((a, x) => a + x.qty * x.price, 0);
+    if (doc) {
+      await patch('/api/invoices/' + doc.id, { items, amount: total, scan_warn: total > 10000 ? 1 : 0 });
+      alert(T('Amount found on the scan') + ': € ' + total.toFixed(2));
+      viewDoc(doc.doc_type, doc.id);
+    } else {
+      alert(T('Amount found on the scan') + ': € ' + total.toFixed(2));
+    }
+  }
+
+  // ---------- print: invoice / quote / bill ----------
+  async function printDoc(id) {
+    const doc = await api('/api/invoices/' + id);
+    const { company } = await api('/api/company');
+    const c = company || {};
+    const vat = Number(doc.vat_rate) || 0;
+    const net = doc.amount_cents / 100;
+    const vatAmt = net * vat / 100;
+    const bank = (c.banks || []).find((b) => String(b.id ?? b.iban) === String(doc.bank_id));
+    const typeLabel = { invoice: 'Invoice', quote: 'Quote', bill: 'Bill', cmr: 'CMR' }[doc.doc_type];
+    const w = window.open('', '_blank');
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(doc.number)}</title>
+    <style>
+      body { font-family: Georgia, 'Times New Roman', serif; color: #1c2b29; margin: 40px; }
+      .head { display: flex; justify-content: space-between; border-bottom: 3px solid #0f766e; padding-bottom: 14px; }
+      .brand { font-size: 26px; font-weight: bold; color: #0f766e; }
+      table { width: 100%; border-collapse: collapse; margin: 24px 0; }
+      th, td { padding: 8px 10px; border-bottom: 1px solid #ddd; text-align: left; }
+      th { background: #f0f6f4; }
+      .totals { margin-left: auto; width: 280px; }
+      .totals td { border: none; padding: 4px 10px; }
+      .tot { font-weight: bold; font-size: 17px; border-top: 2px solid #0f766e; }
+      .foot { margin-top: 60px; color: #6b7c78; font-size: 12px; border-top: 1px solid #ddd; padding-top: 10px; }
+    </style></head><body>
+      <div class="head">
+        <div><div class="brand">Verdins</div><div style="font-size:11px;letter-spacing:3px;color:#6b7c78">ACCOUNTING</div></div>
+        <div style="text-align:right">
+          <div style="font-size:20px;font-weight:bold">${T(typeLabel)} ${esc(doc.number)}</div>
+          <div>${T('Issued:')} ${esc(doc.issue_date)}</div>
+          <div>${T('Due:')} ${esc(doc.due_date || '—')}</div>
+        </div>
+      </div>
+      <table><tr><td style="border:none;padding:14px 10px">
+        <b>${esc(c.full_name || '')}</b><br>${esc(c.address || '')}<br>
+        ${c.reg_no ? 'Reg: ' + esc(c.reg_no) + '<br>' : ''}${c.vat_no ? 'VAT: ' + esc(c.vat_no) + '<br>' : ''}${esc(c.email || '')}
+      </td><td style="border:none;padding:14px 10px;text-align:right">
+        <b>${esc(doc.customer)}</b>
+      </td></tr></table>
+      <table><thead><tr><th>${T('Item')}</th><th>${T('Qty')}</th><th>${T('Unit price')}</th><th style="text-align:right">${T('Sum')}</th></tr></thead>
+      <tbody>${(doc.items && doc.items.length ? doc.items : [{ name: doc.description || '—', qty: 1, price: net }])
+        .map((x) => '<tr><td>' + esc(x.name) + '</td><td>' + esc(x.qty) + '</td><td>€ ' + Number(x.price).toFixed(2) + '</td><td style="text-align:right">€ ' + (x.qty * x.price).toFixed(2) + '</td></tr>').join('')}</tbody></table>
+      <table class="totals"><tr><td>${T('Sum')}</td><td style="text-align:right">€ ${net.toFixed(2)}</td></tr>
+        ${vat ? '<tr><td>VAT ' + vat + '%</td><td style="text-align:right">€ ' + vatAmt.toFixed(2) + '</td></tr>' : ''}
+        <tr class="tot"><td>${T('Total')}</td><td style="text-align:right">€ ${(net + vatAmt).toFixed(2)}</td></tr></table>
+      ${bank ? '<p><b>' + T('Pay to:') + '</b> ' + esc(bank.name || '') + ' · IBAN ' + esc(bank.iban) + (bank.swift ? ' · SWIFT ' + esc(bank.swift) : '') + '</p>' : ''}
+      <div class="foot">Created with Verdins — simple accounting for small businesses</div>
+    </body></html>`);
+    w.document.close();
+    setTimeout(() => w.print(), 400);
+  }
+
+  // ---------- print: CMR consignment note ----------
+  async function printCmr(id) {
+    const doc = await api('/api/invoices/' + id);
+    const { company } = await api('/api/company');
+    const c = company || {};
+    const goods = (doc.items && doc.items.length)
+      ? doc.items.map((x) => esc(x.name) + ' × ' + esc(x.qty)).join('<br>')
+      : esc(doc.description || '—');
+    const w = window.open('', '_blank');
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(doc.number)}</title>
+    <style>
+      body { font-family: Arial, sans-serif; color: #111; margin: 30px; font-size: 13px; }
+      h1 { font-size: 18px; text-align: center; margin: 4px 0 14px; }
+      .box { border: 1px solid #333; padding: 8px 10px; margin: 6px 0; }
+      .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: #555; }
+      .val { font-size: 14px; min-height: 22px; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+      .sign { margin-top: 26px; display: flex; justify-content: space-between; gap: 20px; }
+      .sign div { flex: 1; border-top: 1px solid #333; padding-top: 4px; font-size: 11px; color: #555; }
+      .foot { margin-top: 30px; color: #888; font-size: 10px; text-align: center; }
+    </style></head><body>
+      <h1>${T('CMR consignment note')} ${esc(doc.number)}</h1>
+      <div class="grid">
+        <div class="box"><div class="lbl">${T('Sender')}</div><div class="val"><b>${esc(c.full_name || me.company)}</b>${c.address ? '<br>' + esc(c.address) : ''}${c.vat_no ? '<br>' + esc(c.vat_no) : ''}</div></div>
+        <div class="box"><div class="lbl">${T('Consignee')}</div><div class="val">${esc(doc.customer)}</div></div>
+        <div class="box"><div class="lbl">${T('Carrier')}</div><div class="val">${esc(doc.cmr_carrier || '—')}</div></div>
+        <div class="box"><div class="lbl">${T('Place of dispatch')}</div><div class="val">${esc(doc.cmr_dispatch || '—')}</div></div>
+        <div class="box"><div class="lbl">${T('Place of delivery')}</div><div class="val">${esc(doc.cmr_delivery || doc.due_date || '—')}</div></div>
+        <div class="box"><div class="lbl">${T('Goods')}</div><div class="val">${goods}</div></div>
+        <div class="box"><div class="lbl">${T('Number of packages')}</div><div class="val">${esc(doc.cmr_packages || '—')}</div></div>
+        <div class="box"><div class="lbl">${T('Gross weight (kg)')}</div><div class="val">${esc(doc.cmr_weight || '—')}</div></div>
+      </div>
+      <div class="sign">
+        <div>${T('Sender')}</div>
+        <div>${T('Carrier')}</div>
+        <div>${T('Consignee')}</div>
+      </div>
+      <div class="foot">${T('Issued:')} ${esc(doc.issue_date)} — Created with Verdins</div>
+    </body></html>`);
+    w.document.close();
+    setTimeout(() => w.print(), 400);
+  }
+
+  // ---------- contacts ----------
+  const COLMAP = {
+    name: ['name', 'nosaukums', 'nom', 'nome', 'nombre', 'nazwa'],
+    reg_no: ['reg no', 'registration', 'reģistrācijas', 'registernummer', 'n° d\u2019immatriculation', 'n. di iscrizione', 'n.º de registro', 'nr rejestracyjny'],
+    vat_no: ['vat', 'vat no', 'pvn', 'ust', 'n° de tva', 'p. iva', 'n.º de iva', 'nr vat'],
+    email: ['email', 'e-pasts', 'e-mail', 'correo'],
+    phone: ['phone', 'telefons', 'telefon', 'téléphone', 'telefono', 'teléfono', 'telefon'],
+    address: ['address', 'adrese', 'adresse', 'indirizzo', 'dirección', 'adres'],
   };
-  loadUsers().catch(() => {});
-}
+  async function viewContacts() {
+    const { contacts } = await api('/api/contacts');
+    shell(`
+      <h1>Customers & suppliers</h1>
+      <div class="row" style="gap:8px;margin-top:14px;flex-wrap:wrap">
+        <input id="conSearch" placeholder="${T('Search')}" style="min-width:220px">
+        <button class="btn" id="btnNewCon">Add contact</button>
+        <label class="btn secondary small" for="impFile">Import</label>
+        <input type="file" id="impFile" accept=".csv,.xlsx,.xls" style="display:none">
+        <button class="btn secondary small" id="btnExp">Export CSV</button>
+      </div>
+      <div class="card" style="margin-top:14px"><table>
+        <thead><tr><th>${T('Name')}</th><th>${T('Kind')}</th><th>${T('VAT no.')}</th><th>${T('Email')}</th><th>${T('Phone')}</th><th></th></tr></thead>
+        <tbody id="conBody">
+          ${contacts.map((c) => '<tr><td>' + esc(c.name) + '</td><td>' + T(c.kind === 'company' ? 'Company' : c.kind === 'supplier' ? 'Supplier' : 'Person') + '</td><td>' + esc(c.vat_no || '') + '</td><td>' + esc(c.email || '') + '</td><td>' + esc(c.phone || '') + '</td><td><button class="btn danger small" data-con="' + c.id + '">Delete</button></td></tr>').join('') || '<tr><td colspan="6" class="muted">—</td></tr>'}
+        </tbody></table></div>
+      <div id="conMsg" style="margin-top:10px"></div>
+    `, 'contacts');
+    $('conSearch').oninput = async () => {
+      const { contacts } = await api('/api/contacts?q=' + encodeURIComponent($('conSearch').value));
+      $('conBody').innerHTML = contacts.map((c) => '<tr><td>' + esc(c.name) + '</td><td>' + esc(c.kind) + '</td><td>' + esc(c.vat_no || '') + '</td><td>' + esc(c.email || '') + '</td><td>' + esc(c.phone || '') + '</td><td><button class="btn danger small" data-con="' + c.id + '">Delete</button></td></tr>').join('') || '<tr><td colspan="6" class="muted">—</td></tr>';
+      wireDelete();
+    };
+    function wireDelete() {
+      document.querySelectorAll('button[data-con]').forEach((b) => {
+        b.onclick = async () => { await del('/api/contacts/' + b.dataset.con); viewContacts(); };
+      });
+    }
+    wireDelete();
+    $('btnNewCon').onclick = async () => {
+      const name = prompt(T('Name'));
+      if (!name || !name.trim()) return;
+      const kind = prompt(T('Kind') + ': company / supplier / person', 'company');
+      const vat = prompt(T('VAT no.'), '');
+      await post('/api/contacts', { name: name.trim(), kind: (kind || 'company').trim(), vat_no: vat || '' });
+      viewContacts();
+    };
+    $('impFile').onchange = async () => {
+      const f = $('impFile').files[0];
+      if (!f) return;
+      try {
+        let rows;
+        if (/\.csv$/i.test(f.name)) {
+          const text = await f.text();
+          rows = text.split(/\r?\n/).filter((l) => l.trim()).map((l) => l.match(/("([^"]|"")*"|[^,]*)/g).filter((_, i) => i % 2 === 0).map((s) => s.replace(/^"|"$/g, '').replace(/""/g, '"')));
+        } else {
+          const XLSX = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.mini.mjs');
+          const wb = XLSX.read(await f.arrayBuffer());
+          rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 });
+        }
+        if (!rows.length) throw new Error('empty');
+        const head = rows[0].map((h) => String(h || '').toLowerCase().trim());
+        const idx = {};
+        for (const [key, names] of Object.entries(COLMAP)) idx[key] = head.findIndex((h) => names.includes(h));
+        const list = [];
+        for (let r = 1; r < rows.length; r++) {
+          const get = (k) => idx[k] >= 0 ? rows[r][idx[k]] : '';
+          const name = String(get('name') || '').trim();
+          if (!name) continue;
+          list.push({ name, reg_no: String(get('reg_no') || ''), vat_no: String(get('vat_no') || ''), email: String(get('email') || ''), phone: String(get('phone') || ''), address: String(get('address') || '') });
+        }
+        const res = await post('/api/contacts/import', { contacts: list });
+        $('conMsg').innerHTML = '<div class="good-box">' + T('Added:') + ' ' + res.added + ' · ' + T('Skipped:') + ' ' + (list.length - res.added) + '</div>';
+        setTimeout(viewContacts, 1200);
+      } catch (ex) { $('conMsg').innerHTML = '<div class="error-line">' + T('Could not read the file') + '</div>'; }
+    };
+    $('btnExp').onclick = () => {
+      const csv = 'name,kind,reg_no,vat_no,email,phone,address\n' + contacts.map((c) => [c.name, c.kind, c.reg_no, c.vat_no, c.email, c.phone, c.address].map((x) => '"' + String(x || '').replace(/"/g, '""') + '"').join(',')).join('\n');
+      const a = document.createElement('a');
+      a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+      a.download = 'verdins-contacts.csv';
+      a.click();
+    };
+  }
 
-function showError(msg) {
-  const el = document.getElementById('err');
-  if (el) { el.textContent = msg; el.style.display = 'block'; }
-}
+  // ---------- stock ----------
+  async function viewStock() {
+    const { invoices } = await api('/api/invoices');
+    const map = new Map();
+    const fuzzy = (a, b) => a.toLowerCase().split(/\s+/)[0] === b.toLowerCase().split(/\s+/)[0];
+    for (const i of invoices) {
+      if (i.doc_type === 'bill' && i.status === 'received') {
+        for (const it of i.items || []) {
+          const ex = [...map.keys()].find((k) => fuzzy(k, it.name));
+          const k = ex || it.name;
+          const cur = map.get(k) || { qty: 0, cost: 0, value: 0 };
+          cur.qty += Number(it.qty) || 0; cur.cost = Number(it.price) || cur.cost;
+          cur.value = cur.qty * cur.cost;
+          map.set(k, cur);
+        }
+      }
+      if (i.doc_type === 'invoice' && (i.status === 'sent' || i.status === 'paid')) {
+        for (const it of i.items || []) {
+          const ex = [...map.keys()].find((k) => fuzzy(k, it.name));
+          if (!ex) continue;
+          const cur = map.get(ex);
+          cur.qty -= Number(it.qty) || 0; cur.value = cur.qty * cur.cost;
+        }
+      }
+    }
+    const rows = [...map.entries()].filter(([, v]) => v.qty > 0);
+    shell(`
+      <h1>My stock</h1>
+      ${rows.length ? `<div class="card" style="margin-top:14px"><table>
+        <thead><tr><th>${T('Item name')}</th><th>${T('In stock')}</th><th>${T('Unit cost (last)')}</th><th>${T('Stock value')}</th></tr></thead>
+        <tbody>${rows.map(([n, v]) => '<tr><td>' + esc(n) + '</td><td>' + v.qty + '</td><td>€ ' + v.cost.toFixed(2) + '</td><td>€ ' + v.value.toFixed(2) + '</td></tr>').join('')}</tbody></table></div>`
+      : '<p class="muted" style="margin-top:16px">' + T('Nothing in stock yet') + '</p>'}
+    `, 'stock');
+  }
 
-route();
+  // ---------- scans ----------
+  async function viewScans() {
+    const { scans } = await api('/api/scans');
+    shell(`
+      <h1>Scanned originals</h1>
+      <div class="scan-box" style="margin-top:14px">
+        <label class="btn secondary" for="scanFree">Attach a scanned original (PDF, photo, Excel or CSV)</label>
+        <input type="file" id="scanFree" accept=".pdf,.png,.jpg,.jpeg,.webp">
+        <span class="muted small" id="scanFreeMsg"></span>
+      </div>
+      <div class="card" style="margin-top:14px"><table>
+        <thead><tr><th>${T('File')}</th><th>${T('Linked to document')}</th><th>${T('Actions')}</th></tr></thead>
+        <tbody>${scans.map((s) => '<tr><td><a href="/api/scans/' + s.id + '" target="_blank">' + esc(s.filename) + '</a></td><td>' + esc(s.doc_number || T('Not linked')) + '</td><td><button class="btn danger small" data-scan="' + s.id + '">Delete</button></td></tr>').join('') || '<tr><td colspan="3" class="muted">—</td></tr>'}</tbody>
+      </table></div>
+    `, 'scans');
+    $('scanFree').onchange = async () => {
+      const f = $('scanFree').files[0];
+      if (!f) return;
+      $('scanFreeMsg').textContent = T('Scanning…');
+      try {
+        const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f); });
+        await post('/api/scans', { filename: f.name, data: dataUrl, doc_number: null });
+        $('scanFreeMsg').textContent = T('Backup saved');
+        viewScans();
+      } catch (ex) { $('scanFreeMsg').textContent = T('Could not read the file'); }
+    };
+    document.querySelectorAll('button[data-scan]').forEach((b) => {
+      b.onclick = async () => {
+        await api('/api/scans', { method: 'DELETE', body: JSON.stringify({ id: +b.dataset.scan }) });
+        viewScans();
+      };
+    });
+  }
+
+  // ---------- settings ----------
+  async function viewSettings() {
+    const [meData, companyData, backup, users] = await Promise.all([
+      api('/api/me'), api('/api/company'), api('/api/backup'), api('/api/users')]);
+    const c = companyData.company || { banks: [] };
+    const banks = c.banks || [];
+    const langs = window.VERDINS_I18N ? window.VERDINS_I18N.LANGS : { en: 'English' };
+    const curLang = window.VERDINS_I18N ? window.VERDINS_I18N.getLang() : 'en';
+    shell(`
+      <h1>Settings</h1>
+
+      <div class="card" style="margin-top:14px">
+        <h2>${T('Language')}</h2>
+        <select id="langSel">${Object.entries(langs).map(([k, v]) => '<option value="' + k + '"' + (k === curLang ? ' selected' : '') + '>' + v + '</option>').join('')}</select>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <h2>${T('Company details')}</h2>
+        <div class="grid" style="gap:10px">
+          <label>${T('Full company name')}<br><input id="cName" value="${esc(c.full_name || meData.me.company)}" style="width:100%"></label>
+          <label>${T('Registration no.')}<br><input id="cReg" value="${esc(c.reg_no || '')}"></label>
+          <label>${T('VAT no.')}<br><input id="cVat" value="${esc(c.vat_no || '')}"></label>
+          <label>${T('Email')}<br><input id="cEmail" value="${esc(c.email || '')}"></label>
+          <label>${T('Phone')}<br><input id="cPhone" value="${esc(c.phone || '')}"></label>
+          <label>${T('Address')}<br><input id="cAddr" value="${esc(c.address || '')}"></label>
+          <label>${T('Logo')}<br><input type="file" id="cLogo" accept="image/png,image/jpeg"></label>
+        </div>
+        <h2 style="margin-top:18px">${T('Bank accounts')}</h2>
+        <div id="bankRows"></div>
+        <button class="btn secondary small" id="btnAddBank">Add bank</button>
+        <div style="margin-top:16px"><button class="btn" id="btnSaveCompany">Save</button></div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <h2>${T('Backups')}</h2>
+        <p class="muted small">${T('Set a folder to keep copies of your data')}</p>
+        <label>${T('Backup folder')}<br><input id="bkFolder" value="${esc(backup.folder || '')}" style="width:min(420px,100%)"></label>
+        <label style="display:block;margin-top:8px"><input type="checkbox" id="bkAuto" ${backup.auto ? 'checked' : ''}> ${T('Auto-backup daily')}</label>
+        <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+          <button class="btn secondary" id="bkSave">Save</button>
+          <button class="btn" id="bkRun">${T('Back up now')}</button>
+          <button class="btn secondary" id="bkDl">${T('Download backup')}</button>
+        </div>
+        <div id="bkMsg" class="small" style="margin-top:8px"></div>
+        ${backup.files && backup.files.length ? '<div class="small" style="margin-top:8px">' + backup.files.map((f) => esc(f.name) + ' <span class="muted">(' + Math.round(f.size / 1024) + ' KB)</span>').join('<br>') + '</div>' : ''}
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <h2>${T('Restore everything from a backup file')}</h2>
+        <p class="muted small">${T('Before a software update: make a backup first, update, and if anything goes wrong, restore here.')}</p>
+        <p class="muted small">${T('Current data is saved as a safety copy first.')}</p>
+        <label class="btn secondary" for="restoreFile">${T('Choose a backup file')}</label>
+        <input type="file" id="restoreFile" accept=".db" style="display:none">
+        <span class="muted small" id="restoreName"></span>
+        <button class="btn danger" id="btnRestore" style="margin-top:10px">${T('Restore and restart')}</button>
+        <div id="restoreMsg" style="margin-top:8px"></div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <h2>${T('Two-step verification')}</h2>
+        <div id="mfaBox">
+          <button class="btn" id="mfaStart">Enable</button>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <h2>${T('People')}</h2>
+        <table><tbody>${users.users.map((u) => '<tr><td>' + esc(u.name) + '</td><td class="muted">' + esc(u.email) + '</td><td class="muted">' + T(u.role === 'owner' ? 'Owner' : 'User') + '</td></tr>').join('')}</tbody></table>
+        <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+          <input id="pName" placeholder="${T('Name')}">
+          <input id="pEmail" type="email" placeholder="${T('Email')}">
+          <input id="pPass" type="password" placeholder="${T('Password')}">
+          <button class="btn small" id="btnAddUser">${T('Add person')}</button>
+        </div>
+        <div id="userMsg" class="small" style="margin-top:8px"></div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <h2>Demo</h2>
+        <button class="btn secondary" id="btnDemo">Load demo data</button>
+        <span class="muted small">${T('Adds 10 example documents')}</span>
+      </div>
+    `, 'settings');
+
+    $('langSel').onchange = () => {
+      window.VERDINS_I18N.setLang($('langSel').value);
+      viewSettings();
+    };
+
+    const bankRows = $('bankRows');
+    function renderBanks() {
+      bankRows.innerHTML = banks.map((b, i) => `
+        <div class="row" style="gap:8px;margin:6px 0;flex-wrap:wrap">
+          <input data-bi="${i}" data-bf="name" placeholder="${T('Bank')}" value="${esc(b.name || '')}" style="min-width:140px">
+          <input data-bi="${i}" data-bf="iban" placeholder="IBAN" value="${esc(b.iban || '')}" style="min-width:200px">
+          <input data-bi="${i}" data-bf="swift" placeholder="SWIFT/BIC" value="${esc(b.swift || '')}" style="min-width:120px">
+          ${banks.length > 1 ? '<button class="btn danger small" data-bdel="' + i + '">✕</button>' : ''}
+        </div>`).join('');
+      bankRows.querySelectorAll('input[data-bi]').forEach((inp) => {
+        inp.oninput = () => { banks[+inp.dataset.bi][inp.dataset.bf] = inp.value; };
+      });
+      bankRows.querySelectorAll('button[data-bdel]').forEach((b) => {
+        b.onclick = () => { banks.splice(+b.dataset.bdel, 1); renderBanks(); };
+      });
+    }
+    $('btnAddBank').onclick = () => { if (banks.length < 5) { banks.push({ name: '', iban: '', swift: '' }); renderBanks(); } };
+    renderBanks();
+
+    let logoData = (c.logo && c.logo.startsWith('data:')) ? c.logo : null;
+    $('cLogo').onchange = () => {
+      const f = $('cLogo').files[0];
+      if (!f) return;
+      const r = new FileReader();
+      r.onload = () => { logoData = r.result; };
+      r.readAsDataURL(f);
+    };
+    $('btnSaveCompany').onclick = async () => {
+      try {
+        await post('/api/company', {
+          full_name: $('cName').value, reg_no: $('cReg').value, vat_no: $('cVat').value,
+          email: $('cEmail').value, phone: $('cPhone').value, address: $('cAddr').value,
+          logo: logoData, banks: banks.filter((b) => b.iban || b.name),
+        });
+        alert(T('Backup saved'));
+      } catch (ex) { alert(ex.message); }
+    };
+
+    $('bkSave').onclick = async () => {
+      try {
+        await post('/api/backup', { folder: $('bkFolder').value, auto: $('bkAuto').checked });
+        $('bkMsg').innerHTML = '<span class="good-box">' + T('Backup saved') + '</span>';
+        setTimeout(viewSettings, 900);
+      } catch (ex) { $('bkMsg').innerHTML = '<span class="error-line">' + esc(ex.message) + '</span>'; }
+    };
+    $('bkRun').onclick = async () => {
+      try {
+        const r = await post('/api/backup/run');
+        $('bkMsg').innerHTML = '<span class="good-box">' + T('Backup saved') + ': ' + esc(r.file) + '</span>';
+        setTimeout(viewSettings, 1200);
+      } catch (ex) { $('bkMsg').innerHTML = '<span class="error-line">' + esc(ex.message) + '</span>'; }
+    };
+    $('bkDl').onclick = () => { location.href = '/api/backup/download'; };
+
+    // ---- RESTORE ----
+    let restoreBytes = null;
+    $('restoreFile').onchange = () => {
+      const f = $('restoreFile').files[0];
+      if (!f) { restoreBytes = null; $('restoreName').textContent = ''; return; }
+      restoreBytes = f;
+      $('restoreName').textContent = f.name;
+    };
+    $('btnRestore').onclick = async () => {
+      const msg = $('restoreMsg');
+      if (!restoreBytes) { msg.innerHTML = '<div class="warn-box">' + T('Choose a backup file') + '</div>'; return; }
+      if (!confirm(T('Restore') + '?')) return;
+      msg.innerHTML = '';
+      try {
+        const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(restoreBytes); });
+        await post('/api/backup/restore', { data: dataUrl });
+        msg.innerHTML = '<div class="good-box">' + T('Restoring — the page will reload in a moment') + '</div>';
+        const start = Date.now();
+        (function poll() {
+          fetch('/api/me').then((x) => { if (x.status === 401 || x.ok) location.reload(); else throw 0; })
+            .catch(() => { if (Date.now() - start < 60000) setTimeout(poll, 1000); });
+        })();
+      } catch (ex) {
+        msg.innerHTML = '<div class="error-line">' + (String(ex.message).includes('backup') ? T('Not a valid Verdins backup') : esc(ex.message)) + '</div>';
+      }
+    };
+
+    // ---- MFA ----
+    $('mfaStart').onclick = async () => {
+      try {
+        const r = await post('/api/mfa/setup');
+        $('mfaBox').innerHTML = `
+          <p class="muted small">${T('Scan this in Microsoft Authenticator, then enter a code to confirm')}</p>
+          <textarea readonly rows="2" style="width:min(420px,100%);font-size:12px">${esc(r.uri)}</textarea>
+          <div class="row" style="margin-top:8px;gap:8px">
+            <input id="mfaCode" maxlength="6" inputmode="numeric" placeholder="000000" style="width:110px">
+            <button class="btn small" id="mfaConfirm">Verify</button>
+          </div>
+          <div id="mfaMsg" class="small" style="margin-top:8px"></div>`;
+        $('mfaConfirm').onclick = async () => {
+          try {
+            await post('/api/mfa/enable', { code: $('mfaCode').value.trim() });
+            $('mfaBox').innerHTML = '<span class="good-box">' + T('Two-step verification') + ': ' + T('Enable') + 'd</span> <button class="btn secondary small" id="mfaOff">Disable</button>';
+            $('mfaOff').onclick = async () => { await post('/api/mfa/disable'); viewSettings(); };
+          } catch (ex) { $('mfaMsg').innerHTML = '<span class="error-line">' + esc(ex.message) + '</span>'; }
+        };
+      } catch (ex) { alert(ex.message); }
+    };
+
+    $('btnAddUser').onclick = async () => {
+      try {
+        await post('/api/users', { name: $('pName').value, email: $('pEmail').value, password: $('pPass').value, role: 'user' });
+        viewSettings();
+      } catch (ex) { $('userMsg').innerHTML = '<span class="error-line">' + esc(ex.message) + '</span>'; }
+    };
+    $('btnDemo').onclick = async () => {
+      try { await post('/api/demo'); alert(T('Demo data loaded')); location.hash = '#dashboard'; }
+      catch (ex) { alert(ex.message); }
+    };
+  }
+
+  // ---------- router ----------
+  function route() {
+    if (!me) return;
+    const h = (location.hash || '#dashboard').slice(1);
+    const [name, qs] = h.split('?');
+    const query = Object.fromEntries(new URLSearchParams(qs || ''));
+    if (name === 'documents' && query.d) viewDoc(null, query.d).catch(() => viewLogin('login'));
+    else if (name === 'documents') viewDocuments(query).catch(() => viewLogin('login'));
+    else if (name === 'contacts') viewContacts().catch(() => viewLogin('login'));
+    else if (name === 'stock') viewStock().catch(() => viewLogin('login'));
+    else if (name === 'scans') viewScans().catch(() => viewLogin('login'));
+    else if (name === 'settings') viewSettings().catch(() => viewLogin('login'));
+    else viewDashboard().catch(() => viewLogin('login'));
+  }
+  window.addEventListener('hashchange', route);
+
+  async function enterApp() {
+    try { const r = await api('/api/me'); me = r.me; }
+    catch { return viewLogin('login'); }
+    if (!location.hash || location.hash === '#') location.hash = '#dashboard';
+    else route();
+  }
+  enterApp();
+})();

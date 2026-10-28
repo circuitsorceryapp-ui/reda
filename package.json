@@ -1,13 +1,13 @@
 {
-  "name": "reda",
-  "version": "0.1.0",
-  "description": "Reda - Lite ERP for EU small businesses (multi-tenant starter: auth + company isolation + Microsoft Authenticator MFA)",
+  "name": "verdins",
+  "version": "1.2.0",
+  "description": "Verdins — simple multi-company accounting for small businesses (invoices, quotes, bills, CMR waybills, contacts, stock, scans, backups, restore)",
   "main": "server.js",
+  "engines": { "node": ">=22" },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "build": "node build/build-exe.cjs"
   },
-  "engines": {
-    "node": ">=22.5.0"
-  },
-  "license": "MIT"
+  "license": "SEE LICENSE IN LICENSE",
+  "private": true
 }

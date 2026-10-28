@@ -1,288 +1,478 @@
-// Reda i18n — language switch (default: English; change in Settings → Language)
-// New languages: add a block to DICT below with "your phrase": "translation".
+// Verdins — translations for 7 languages. English is the source; every other
+// language maps English phrases → translated phrases. Unknown text passes through.
 (function () {
-  const LANGS = { en: 'English', lv: 'Latviešu' };
-  const getLang = () => { try { return localStorage.getItem('reda_lang') || 'en'; } catch { return 'en'; } };
-  const setLang = (l) => { try { localStorage.setItem('reda_lang', LANGS[l] ? l : 'en'); } catch {} };
+  'use strict';
+  if (window.VERDINS_I18N) return;
 
-  const DICT = {
+  var LANGS = { en: 'English', lv: 'Latviešu', de: 'Deutsch', fr: 'Français', it: 'Italiano', es: 'Español', pl: 'Polski' };
+
+  // capture the RAW getters/setters BEFORE patching (or we recurse forever)
+  var proto = typeof Element !== 'undefined' ? Element.prototype : null;
+  var rawGetIH = null, rawSetIH = null;
+  if (proto) {
+    try {
+      var d = Object.getOwnPropertyDescriptor(proto, 'innerHTML');
+      if (d) { rawGetIH = d.get; rawSetIH = d.set; }
+    } catch (e) {}
+  }
+  var nproto = typeof Node !== 'undefined' ? Node.prototype : null;
+  var rawGetTC = null, rawSetTC = null;
+  if (nproto) {
+    try {
+      var d2 = Object.getOwnPropertyDescriptor(nproto, 'textContent');
+      if (d2) { rawGetTC = d2.get; rawSetTC = d2.set; }
+    } catch (e) {}
+  }
+
+  var DICT = {
+    en: {},
     lv: {
-      // ---- sidebar / general ----
-      '📊 Invoices': '📊 Rēķini',
-      '👥 Customers & suppliers': '👥 Klienti un piegādātāji',
-      '⚙️ Settings': '⚙️ Iestatījumi',
-      'Log out': 'Izrakstīties',
-      'Loading…': 'Ielādē…',
-      'Search': 'Meklēt',
-      // ---- page headings ----
-      'Documents & money': 'Dokumenti un nauda',
-      'Customers & suppliers': 'Klienti un piegādātāji',
-      'Settings': 'Iestatījumi',
-      'Welcome back': 'Laipni lūdzam atpakaļ',
-      'Create your workspace': 'Izveidojiet savu darbvietu',
-      'Two-step verification': 'Divfaktoru autentifikācija',
-      'Two-step verification (Microsoft Authenticator)': 'Divfaktoru autentifikācija (Microsoft Authenticator)',
-      'Protect your account': 'Aizsargājiet savu kontu',
-      'Company & account': 'Uzņēmums un konts',
-      // ---- dashboard cards ----
-      'New document': 'Jauns dokuments',
-      'Your documents': 'Jūsu dokumenti',
-      '📦 My stock (inventory)': '📦 Mans krājums (noliktava)',
-      '📷 Scan a document (optional)': '📷 Skenēt dokumentu (pēc izvēles)',
-      '🛒 Purchase steps': '🛒 Iepirkuma soļi',
-      '💼 By customer': '💼 Pēc klienta',
-      '💰 Unpaid — who to chase, what to pay': '💰 Neapmaksāts — kam zvanīt, ko maksāt',
-      '🧪 Demo data for testing': '🧪 Testa dati izmēģināšanai',
-      '🏢 Company details & logo (used on printouts)': '🏢 Uzņēmuma dati un logo (uz izdrukas)',
-      '👥 People in your company': '👥 Cilvēki jūsu uzņēmumā',
-      // ---- scans page ----
-      '📎 Scanned originals': '📎 Noskenētie origināli',
-      'Scanned originals (PDF / photos)': 'Noskenētie origināli (PDF / foto)',
-      'View': 'Apskatīt',
-      'New scan': 'Jauns',
-      'No scanned originals yet': 'Noskenētu originālu vēl nav',
-      // ---- stats ----
-      'Customers owe you': 'Klienti ir parādā jums',
-      'You owe suppliers': 'Jūs esat parādā piegādātājiem',
-      'Sales invoiced': 'Izrakstītie rēķini',
-      'Sales paid': 'Apmaksātie rēķini',
-      'Open offers': 'Aktīvie piedāvājumi',
-      // ---- tabs / doc types ----
-      'All': 'Visi',
-      'Offer': 'Piedāvājums',
-      'Delivery note': 'Pavadzīme',
-      'Invoice': 'Rēķins',
-      'Purchase bill': 'Iepirkuma rēķins',
-      // ---- form labels ----
-      'Type': 'Veids',
-      'Customer / supplier': 'Klients / piegādātājs',
-      'Currency': 'Valūta',
-      'Bank account for payment': 'Bankas konts apmaksai',
-      'Bank accounts (you can add more than one)': 'Bankas konti (var pievienot vairākus)',
-      'Document date': 'Dokumenta datums',
-      'Payment due date': 'Apmaksas termiņš',
-      'Note (optional)': 'Piezīme (pēc izvēles)',
-      'Products / services': 'Preces / pakalpojumi',
-      'VAT country (local law)': 'PVN valsts (likums)',
-      'VAT rate': 'PVN likme',
-      'Sum without VAT': 'Summa bez PVN',
-      'VAT amount': 'PVN summa',
-      'Total with VAT': 'Kopā ar PVN',
-      'Address': 'Adrese',
-      'Registration no.': 'Reģistrācijas nr.',
-      'VAT (PVN) no.': 'PVN (VAT) nr.',
-      'Phone': 'Telefons',
-      'Email': 'E-pasts',
-      'Name': 'Vārds',
-      'Name *': 'Nosaukums *',
-      'Password': 'Parole',
-      'Password (min 8 characters)': 'Parole (vismaz 8 zīmes)',
-      'Password (min 8)': 'Parole (vismaz 8)',
-      'Company name': 'Uzņēmuma nosaukums',
-      'Your name': 'Jūsu vārds',
-      'Role': 'Loma',
-      'Authenticator code': 'Autentifikatora kods',
-      'Language / Valoda': 'Language / Valoda',
-      // ---- buttons ----
-      'Add document': 'Pievienot dokumentu',
-      '+ Add line': '+ Pievienot rindu',
-      '📷 Scan / photo / PDF / Excel': '📷 Skenēt / foto / PDF / Excel',
-      'Save company details': 'Saglabāt uzņēmuma datus',
-      'Log in': 'Pieslēgties',
-      '+ Add bank account': '+ Pievienot bankas kontu',
-      '➕ Add 10 demo documents': '➕ Pievienot 10 testa dokumentus',
-      'Delete': 'Dzēst',
-      'Mark sent': 'Atzīmēt kā nosūtītu',
-      '→ Invoice': '→ Rēķins',
-      '→ Delivery': '→ Pavadzīme',
-      '➕ Lines': '➕ Rindas',
-      '💰 Pay': '💰 Maksāt',
-      '✔ Accepted': '✔ Pieņemts',
-      '📤 Order': '📤 Pasūtīt',
-      '📥 Received': '📥 Saņemts',
-      'Create account': 'Izveidot kontu',
-      'Log in instead': 'Esošs konts? Ieej šeit',
-      // ---- table headers ----
-      'Customer': 'Klients',
-      'Amount': 'Summa',
-      'Paid': 'Apmaksāts',
-      'Remaining': 'Atlikums',
-      'Due': 'Termiņš',
-      'Status': 'Statuss',
-      'Product': 'Prece',
-      'In stock': 'Noliktavā',
-      'Unit cost (last)': 'Iepirkuma cena (pēdējā)',
-      'Value': 'Vērtība',
-      'Code': 'Kods',
-      'Product / service': 'Prece / pakalpojums',
-      'Tax code': 'PVN kods',
-      'Qty': 'Daudzums',
-      'Unit price': 'Vienības cena',
-      'Sum': 'Summa',
-      // ---- sort ----
-      'Sort:': 'Kārtot:',
-      'Newest first': 'Jaunākie sākumā',
-      'Customer A–Z': 'Klients A–Z',
-      'Amount high → low': 'Summa lielākā → mazākā',
-      'Due date (soonest)': 'Termiņš (tuvākais)',
-      'Unpaid first': 'Neapmaksātie sākumā',
-      // ---- statuses ----
-      'draft': 'melnraksts', 'sent': 'nosūtīts', 'paid': 'apmaksāts',
-      'ordered': 'pasūtīts', 'received': 'saņemts',
-      'accepted': 'pieņemts', 'rejected': 'noraidīts', 'delivered': 'nogādāts',
-      // ---- purchase steps panel ----
-      '📝 1. Decided to buy': '📝 1. Izlēmām pirkt',
-      '📤 2. Ordered (email sent)': '📤 2. Pasūtīts (e-pasts nosūtīts)',
-      '📥 3. In stock': '📥 3. Noliktavā',
-      '✔ 4. Paid': '✔ 4. Apmaksāts',
-      // ---- placeholders ----
-      '🔎 Search by word, name, number or amount…': '🔎 Meklēt pēc vārda, nosaukuma, numura vai summas…',
-      '🔎 Find a product…': '🔎 Atrast preci…',
-      'Start typing a name, phone or email…': 'Sāciet rakstīt vārdu, telefonu vai e-pastu…',
-      'Search by company, person, phone, email, registration or VAT number…': 'Meklēt uzņēmumu, personu, telefonu, e-pastu, reģistrācijas vai PVN numuru…',
-      'Product or service': 'Prece vai pakalpojums',
-      'Optional (CN/VAT)': 'Pēc izvēles (CN/PVN)',
-      'Extra note for this document': 'Papildu piezīme šim dokumentam',
-      'Bank name (e.g. Swedbank)': 'Bankas nosaukums (piem. Swedbank)',
-      'SWIFT/BIC (optional)': 'SWIFT/BIC (pēc izvēles)',
-      'Street, city, postal code, country': 'Iela, pilsēta, pasta indekss, valsts',
-      // ---- empty states ----
-      'No documents here yet — create one above. Only your company can see these.': 'Šeit vēl nav dokumentu — izveidojiet to augstāk. Tos redz tikai jūsu uzņēmums.',
-      'Nothing unpaid. ✔': 'Nav neapmaksātu. ✔',
-      'No purchase bills yet. Scan a supplier bill and choose “Purchase bill”.': 'Iepirkuma rēķinu vēl nav. Noskenējiet piegādātāja rēķinu un izvēlieties “Iepirkuma rēķins”.',
-      'No sales invoices yet.': 'Pārdošanas rēķinu vēl nav.',
-      // ---- print (PDF) ----
-      'OFFER / QUOTE': 'PIEDĀVĀJUMS',
-      'DELIVERY NOTE': 'PAVADZĪME',
-      'INVOICE': 'RĒĶINS',
-      'PURCHASE BILL': 'IEPIRKUMA RĒĶINS',
-      'From': 'Izdevējs',
-      'To': 'Saņēmējs',
-      'Issued:': 'Izsniegts:',
-      'Total incl. VAT': 'Kopā ar PVN',
-      'Paid to date': 'Apmaksāts līdz šodienai',
-      'Total due': 'Apmaksājama kopsumma',
-      'Total offered': 'Piedāvājuma kopsumma',
-      'Payment/delivery due:': 'Apmaksas/piegādes termiņš:',
-      'Status:': 'Statuss:',
-      'Printed on': 'Izdrukāts',
-      'Generated with Reda — lite ERP for small business': 'Izveidots ar Reda — vienkāršs ERP mazajiem uzņēmumiem',
-      'Pay to:': 'Maksājuma konts:',
-      'Reg. no.': 'Reģ. nr.',
-      'VAT no.': 'PVN nr.',
-      'Bank:': 'Banka:',
-      // ---- contacts view ----
-      '👤 person': '👤 persona',
-      '🏢 company': '🏢 uzņēmums',
-      '✏️ Edit': '✏️ Labot',
-      'Add contact': 'Pievienot kontaktu',
-      'VAT no.': 'PVN nr.',
-      'No contacts found. Add your first customer below — then you can pick them by name, phone or email when writing invoices.': 'Kontaktu nav. Pievienojiet pirmo klientu zemāk — pēc tam rēķinus varēsiet izvēlēties pēc vārda, telefona vai e-pasta.',
-      'Person': 'Persona',
-      'Company': 'Uzņēmums',
-      // ---- login / register ----
-      'Create your company workspace': 'Izveidojiet savas firmas darbvietu',
-      'Log in instead': 'Esošs konts? Ieej šeit',
-      'No account yet?': 'Konta vēl nav?',
-      'Email': 'E-pasts',
-      // ---- settings / MFA ----
-      'Two-step verification (Microsoft Authenticator)': 'Divfaktoru autentifikācija (Microsoft Authenticator)',
-      'Set up Microsoft Authenticator': 'Iestatīt Microsoft Authenticator',
-      'Set up Microsoft Authenticator': 'Iestatīt Microsoft Authenticator',
-      'Disable MFA': 'Izslēgt MFA',
-      'Disable': 'Izslēgt',
-      'Enable': 'Ieslēgt',
-      'Save': 'Saglabāt',
-      'Cancel': 'Atcelt',
-      '📤 Upload logo': '📤 Augšupielādēt logo',
-      '🗑 Remove logo': '🗑 Noņemt logo',
-      'Demo data for testing': 'Testa dati izmēģināšanai',
-      // ---- scanned / scan statuses ----
-      'Scanned goods — please check': 'Noskenētas preces — pārbaudiet',
-      'check': 'pārbaudīt',
-      '← converted': '← konvertēts',
-      // ---- contacts import / export ----
-      'Import from Excel / CSV': 'Importēt no Excel / CSV',
-      'Export CSV': 'Eksportēt CSV',
-      'Save contact': 'Saglabāt kontaktu',
-      'Cancel edit': 'Atcelt labošanu',
-      'Add new contact': 'Pievienot jaunu kontaktu',
-      'Clear': 'Notīrīt',
-      'Reading file…': 'Nolasu failu…',
-      'No contacts found — is there a "Name" column?': 'Kontakti nav atrasti — vai failā ir kolonna "Name"?',
-      // ---- backups (v12) ----
-      '💾 Backups': '💾 Rezerves kopijas',
-      'Reda keeps everything (documents, contacts, scanned originals) in one database file. Set a folder here and Reda will save a full copy there every day — or click "Back up now" any time. Keep the 30 newest copies, older ones are removed automatically.': 'Reda glabā visu (dokumentus, kontaktus, skenētos oriģinālus) vienā datubāzes failā. Norādiet mapi, un Reda katru dienu saglabās tajā pilnu kopiju — vai arī jebkurā laikā nospiediet "Izveidot kopiju tagad". Tiek glabātas 30 jaunākās kopijas, vecākās tiek dzēstas automātiski.',
-      'Backup folder (full path on the server)': 'Rezerves kopiju mape (pilnais ceļš serverī)',
-      'Save a fresh copy automatically every day': 'Saglabāt svaigu kopiju automātiski katru dienu',
-      'Save settings': 'Saglabāt iestatījumus',
-      'Back up now': 'Izveidot kopiju tagad',
-      'Download backup file': 'Lejupielādēt rezerves kopiju',
-      'No backups saved yet.': 'Rezerves kopiju vēl nav.',
-      'File': 'Fails',
-      'Size': 'Izmērs',
+      'Dashboard': 'Pārskats', 'Documents': 'Dokumenti', 'Customers & suppliers': 'Klienti un piegādātāji',
+      'My stock': 'Mans krājums', 'Scanned originals': 'Skenētie origināli', 'Settings': 'Iestatījumi',
+      'Log out': 'Izrakstīties', 'Welcome back': 'Laipni lūdzam atpakaļ',
+      'Sign in to your company workspace': 'Pieslēdzieties savas uzņēmuma darbvietai', 'Sign in': 'Ieiet',
+      'New company? Create one': 'Jauns uzņēmums? Izveidojiet to', 'Create a company workspace': 'Izveidot uzņēmuma darbvietu',
+      'One workspace for your whole company': 'Viena darbvieta visam jūsu uzņēmumam',
+      'Company name': 'Uzņēmuma nosaukums', 'Your name': 'Jūsu vārds', 'Email': 'E-pasts', 'Password': 'Parole',
+      'Create workspace': 'Izveidot darbvietu', 'Already have an account? Sign in': 'Jau ir konts? Ieejiet',
+      'Two-step verification': 'Divpakāpju verificēšana', 'Enter the 6-digit code from your app': 'Ievadiet 6 ciparu kodu no savas lietotnes',
+      'Verify': 'Apstiprināt', 'Who owes you': 'Kas jums parādā', 'You owe suppliers': 'Jūs parādāt piegādātājiem',
+      'Documents this month': 'Dokumenti šomēnes', 'Unpaid documents': 'Nesamaksātie dokumenti',
+      'No unpaid documents yet': 'Vēl nav nesamaksātu dokumentu', 'Number': 'Numurs', 'Customer': 'Klients',
+      'Amount': 'Summa', 'Due date': 'Apmaksas termiņš', 'Search documents': 'Meklēt dokumentus',
+      'All types': 'Visi tipi', 'Invoices': 'Rēķini', 'Quotes': 'Piedāvājumi', 'Bills (purchases)': 'Pirkuma rēķini',
+      'CMR waybills': 'CMR kravas pavaddokumenti', 'Newest first': 'Jaunākie augšā', 'Oldest first': 'Vecākie augšā',
+      'Amount largest → smallest': 'Summa lielākā → mazākā', 'Amount smallest → largest': 'Summa mazākā → lielākā',
+      'Due soonest': 'Termiņš tuvākais', 'New invoice': 'Jauns rēķins', 'New quote': 'Jauns piedāvājums',
+      'New bill': 'Jauns pirkuma rēķins', 'New CMR': 'Jauns CMR', 'Status': 'Statuss', 'Issue date': 'Izdošanas datums',
+      'Nothing here yet': 'Šeit vēl nekā nav', 'New document': 'Jauns dokuments',
+      'The amount on this document looks unusual — please check': 'Summa šajā dokumentā izskatās neparasta — lūdzu, pārbaudiet',
+      'check': 'pārbaudīt', 'Description': 'Apraksts', 'Bank account on printout': 'Bankas konts izdrukā',
+      'Line items': 'Rindas', 'Item': 'Prece', 'Qty': 'Skaits', 'Unit price': 'Vienības cena', 'Sum': 'Kopā',
+      'Add line': 'Pievienot rindu', 'Save': 'Saglabāt', 'Print': 'Drukāt', 'Delete': 'Dzēst',
+      'Delete document?': 'Dzēst dokumentu?', 'Document saved': 'Dokuments saglabāts', 'Generate CMR': 'Izveidot CMR',
+      'Payments': 'Maksājumi', 'Quotes are not paid': 'Piedāvājumus nemaksā', 'Payment amount': 'Maksājuma summa',
+      'Payment date': 'Maksājuma datums', 'Record payment': 'Fiksēt maksājumu', 'Link scan': 'Piesaistīt skenējumu',
+      'Scanning…': 'Skenēšana…', 'Scan saved and linked': 'Skenējums saglabāts un piesaistīts',
+      'Could not read the file': 'Failu neizdevās nolasīt', 'Amount found on the scan': 'Uz skenējuma atrasta summa',
+      'Large amount — please check the document': 'Liela summa — lūdzu, pārbaudiet dokumentu',
+      'Not linked': 'Nav piesaistīts', 'Attach a scanned original (PDF, photo, Excel or CSV)': 'Pievienojiet skenētu originālu (PDF, foto, Excel vai CSV)',
+      'Search': 'Meklēt', 'Add contact': 'Pievienot kontaktu', 'Name': 'Nosaukums', 'Kind': 'Veids',
+      'VAT no.': 'PVN nr.', 'Phone': 'Telefons', 'Import': 'Importēt', 'Export CSV': 'Eksportēt CSV',
+      'Added:': 'Pievienoti:', 'Skipped:': 'Izlaisti:', 'Company': 'Uzņēmums', 'Supplier': 'Piegādātājs',
+      'Person': 'Persona', 'Nothing in stock yet': 'Krājumā vēl nekā nav', 'In stock': 'Krājumā',
+      'Unit cost (last)': 'Vienības izmaksas (pēdējās)', 'Stock value': 'Krājuma vērtība', 'Item name': 'Preces nosaukums',
+      'File': 'Fails', 'Linked to document': 'Piesaistīts dokumentam', 'Actions': 'Darbības',
+      'Language': 'Valoda', 'Company details': 'Uzņēmuma dati', 'Full company name': 'Pilns uzņēmuma nosaukums',
+      'Registration no.': 'Reģistrācijas nr.', 'Address': 'Adrese', 'Logo': 'Logo', 'Bank accounts': 'Bankas konti',
+      'Bank': 'Banka', 'Add bank': 'Pievienot banku', 'Backups': 'Rezerves kopijas',
+      'Set a folder to keep copies of your data': 'Norādiet mapi, kur glabāt savu datu kopijas',
+      'Backup folder': 'Rezerves kopiju mape', 'Auto-backup daily': 'Automātiska rezerves kopija katru dienu',
+      'Back up now': 'Izveidot kopiju tagad', 'Download backup': 'Lejupielādēt rezerves kopiju',
+      'Backup saved': 'Rezerves kopija saglabāta',
+      'Restore everything from a backup file': 'Atjaunot visu no rezerves kopijas faila',
+      'Before a software update: make a backup first, update, and if anything goes wrong, restore here.': 'Pirms programmatūras atjaunināšanas: vispirms izveidojiet rezerves kopiju, atjauniniet, un, ja kaut kas nogāja greizi, atjaunojiet šeit.',
+      'Current data is saved as a safety copy first.': 'Pašreizējie dati vispirms tiek saglabāti kā drošības kopija.',
+      'Choose a backup file': 'Izvēlieties rezerves kopijas failu', 'Restore and restart': 'Atjaunot un pārstartēt',
+      'Restore': 'Atjaunot', 'Restoring — the page will reload in a moment': 'Atjaunošana — lapa drīz tiks pārlādēta',
+      'Not a valid Verdins backup': 'Nav derīga Verdins rezerves kopija', 'Enable': 'Ieslēgt', 'Disable': 'Izslēgt',
+      'Scan this in Microsoft Authenticator, then enter a code to confirm': 'Noskenējiet to Microsoft Authenticator lietotnē, tad ievadiet kodu apstiprināšanai',
+      'People': 'Cilvēki', 'Add person': 'Pievienot personu', 'Load demo data': 'Ielādēt demo datus',
+      'Demo data loaded': 'Demo dati ielādēti', 'Owner': 'Īpašnieks', 'User': 'Lietotājs',
+      'Adds 10 example documents': 'Pievieno 10 parauga dokumentus',
+      'Invoice': 'Rēķins', 'Quote': 'Piedāvājums', 'Bill': 'Pirkuma rēķins', 'CMR': 'CMR',
+      'Issued:': 'Izsniegts:', 'Due:': 'Termiņš:', 'Total': 'Kopā samaksāt', 'Pay to:': 'Maksāt uz:',
+      'Sender': 'Sūtītājs', 'Carrier': 'Pārvadātājs', 'Consignee': 'Saņēmējs', 'Place of dispatch': 'Nosūtīšanas vieta',
+      'Place of delivery': 'Piegādes vieta', 'Goods': 'Krava', 'Number of packages': 'Iepakojumu skaits',
+      'Gross weight (kg)': 'Bruto masa (kg)', 'Draft': 'Melnraksts', 'Sent': 'Nosūtīts', 'Partial': 'Daļēji',
+      'Paid': 'Samaksāts', 'Ordered': 'Pasūtīts', 'Received': 'Saņemts', 'Overdue': 'Nokavēts',
+      'CMR consignment note': 'CMR kravas pavaddokuments',
       'Created': 'Izveidots',
-      'Saving…': 'Saglabāju…',
-      'Settings saved ✔': 'Iestatījumi saglabāti ✔',
-      'Making backup…': 'Izveidoju kopiju…',
+    },
+    de: {
+      'Dashboard': 'Übersicht', 'Documents': 'Belege', 'Customers & suppliers': 'Kunden & Lieferanten',
+      'My stock': 'Mein Lager', 'Scanned originals': 'Gescannte Originale', 'Settings': 'Einstellungen',
+      'Log out': 'Abmelden', 'Welcome back': 'Willkommen zurück',
+      'Sign in to your company workspace': 'Melden Sie sich bei Ihrem Firmen-Arbeitsbereich an', 'Sign in': 'Anmelden',
+      'New company? Create one': 'Neue Firma? Erstellen Sie eine', 'Create a company workspace': 'Firmen-Arbeitsbereich erstellen',
+      'One workspace for your whole company': 'Ein Arbeitsbereich für Ihr ganzes Unternehmen',
+      'Company name': 'Firmenname', 'Your name': 'Ihr Name', 'Email': 'E-Mail', 'Password': 'Passwort',
+      'Create workspace': 'Arbeitsbereich erstellen', 'Already have an account? Sign in': 'Schon ein Konto? Anmelden',
+      'Two-step verification': 'Zwei-Faktor-Verifizierung', 'Enter the 6-digit code from your app': 'Geben Sie den 6-stelligen Code aus Ihrer App ein',
+      'Verify': 'Bestätigen', 'Who owes you': 'Wer Ihnen etwas schuldet', 'You owe suppliers': 'Sie schulden Lieferanten',
+      'Documents this month': 'Belege in diesem Monat', 'Unpaid documents': 'Unbezahlte Belege',
+      'No unpaid documents yet': 'Noch keine unbezahlten Belege', 'Number': 'Nummer', 'Customer': 'Kunde',
+      'Amount': 'Betrag', 'Due date': 'Fällig am', 'Search documents': 'Belege suchen',
+      'All types': 'Alle Arten', 'Invoices': 'Rechnungen', 'Quotes': 'Angebote', 'Bills (purchases)': 'Einkaufsrechnungen',
+      'CMR waybills': 'CMR-Frachtbriefe', 'Newest first': 'Neueste zuerst', 'Oldest first': 'Älteste zuerst',
+      'Amount largest → smallest': 'Betrag größte → kleinste', 'Amount smallest → largest': 'Betrag kleinste → größte',
+      'Due soonest': 'Früheste Fälligkeit', 'New invoice': 'Neue Rechnung', 'New quote': 'Neues Angebot',
+      'New bill': 'Neue Einkaufsrechnung', 'New CMR': 'Neuer CMR', 'Status': 'Status', 'Issue date': 'Ausstellungsdatum',
+      'Nothing here yet': 'Noch nichts hier', 'New document': 'Neuer Beleg',
+      'The amount on this document looks unusual — please check': 'Der Betrag auf diesem Beleg wirkt ungewöhnlich — bitte prüfen',
+      'check': 'prüfen', 'Description': 'Beschreibung', 'Bank account on printout': 'Bankkonto im Ausdruck',
+      'Line items': 'Positionen', 'Item': 'Artikel', 'Qty': 'Menge', 'Unit price': 'Einzelpreis', 'Sum': 'Summe',
+      'Add line': 'Position hinzufügen', 'Save': 'Speichern', 'Print': 'Drucken', 'Delete': 'Löschen',
+      'Delete document?': 'Beleg löschen?', 'Document saved': 'Beleg gespeichert', 'Generate CMR': 'CMR erstellen',
+      'Payments': 'Zahlungen', 'Quotes are not paid': 'Angebote werden nicht bezahlt', 'Payment amount': 'Zahlungsbetrag',
+      'Payment date': 'Zahlungsdatum', 'Record payment': 'Zahlung erfassen', 'Link scan': 'Scan verknüpfen',
+      'Scanning…': 'Scannen…', 'Scan saved and linked': 'Scan gespeichert und verknüpft',
+      'Could not read the file': 'Datei konnte nicht gelesen werden', 'Amount found on the scan': 'Betrag im Scan gefunden',
+      'Large amount — please check the document': 'Hoher Betrag — bitte den Beleg prüfen',
+      'Not linked': 'Nicht verknüpft', 'Attach a scanned original (PDF, photo, Excel or CSV)': 'Gescanntes Original anhängen (PDF, Foto, Excel oder CSV)',
+      'Search': 'Suchen', 'Add contact': 'Kontakt hinzufügen', 'Name': 'Name', 'Kind': 'Art',
+      'VAT no.': 'USt-IdNr.', 'Phone': 'Telefon', 'Import': 'Importieren', 'Export CSV': 'CSV exportieren',
+      'Added:': 'Hinzugefügt:', 'Skipped:': 'Übersprungen:', 'Company': 'Firma', 'Supplier': 'Lieferant',
+      'Person': 'Person', 'Nothing in stock yet': 'Noch nichts im Lager', 'In stock': 'Auf Lager',
+      'Unit cost (last)': 'Einheitskosten (letzte)', 'Stock value': 'Lagerwert', 'Item name': 'Artikelname',
+      'File': 'Datei', 'Linked to document': 'Mit Beleg verknüpft', 'Actions': 'Aktionen',
+      'Language': 'Sprache', 'Company details': 'Firmendaten', 'Full company name': 'Vollständiger Firmenname',
+      'Registration no.': 'Registernummer', 'Address': 'Adresse', 'Logo': 'Logo', 'Bank accounts': 'Bankkonten',
+      'Bank': 'Bank', 'Add bank': 'Bank hinzufügen', 'Backups': 'Sicherungen',
+      'Set a folder to keep copies of your data': 'Legen Sie einen Ordner für Kopien Ihrer Daten fest',
+      'Backup folder': 'Sicherungsordner', 'Auto-backup daily': 'Tägliche automatische Sicherung',
+      'Back up now': 'Jetzt sichern', 'Download backup': 'Sicherung herunterladen',
+      'Backup saved': 'Sicherung gespeichert',
+      'Restore everything from a backup file': 'Alles aus einer Sicherungsdatei wiederherstellen',
+      'Before a software update: make a backup first, update, and if anything goes wrong, restore here.': 'Vor einem Software-Update: Erstellen Sie zuerst eine Sicherung, aktualisieren Sie, und falls etwas schiefgeht, stellen Sie es hier wieder her.',
+      'Current data is saved as a safety copy first.': 'Die aktuellen Daten werden zuerst als Sicherheitskopie gespeichert.',
+      'Choose a backup file': 'Sicherungsdatei auswählen', 'Restore and restart': 'Wiederherstellen und neu starten',
+      'Restore': 'Wiederherstellen', 'Restoring — the page will reload in a moment': 'Wird wiederhergestellt — die Seite lädt in einem Moment neu',
+      'Not a valid Verdins backup': 'Keine gültige Verdins-Sicherung', 'Enable': 'Aktivieren', 'Disable': 'Deaktivieren',
+      'Scan this in Microsoft Authenticator, then enter a code to confirm': 'Scannen Sie dies in Microsoft Authenticator und geben Sie dann einen Bestätigungscode ein',
+      'People': 'Personen', 'Add person': 'Person hinzufügen', 'Load demo data': 'Demodaten laden',
+      'Demo data loaded': 'Demodaten geladen', 'Owner': 'Inhaber', 'User': 'Benutzer',
+      'Adds 10 example documents': 'Fügt 10 Beispielbelege hinzu',
+      'Invoice': 'Rechnung', 'Quote': 'Angebot', 'Bill': 'Einkaufsrechnung', 'CMR': 'CMR',
+      'Issued:': 'Ausgestellt:', 'Due:': 'Fällig:', 'Total': 'Gesamt', 'Pay to:': 'Zahlen an:',
+      'Sender': 'Absender', 'Carrier': 'Frachtführer', 'Consignee': 'Empfänger', 'Place of dispatch': 'Absendeort',
+      'Place of delivery': 'Lieferort', 'Goods': 'Ware', 'Number of packages': 'Anzahl Packstücke',
+      'Gross weight (kg)': 'Bruttogewicht (kg)', 'Draft': 'Entwurf', 'Sent': 'Gesendet', 'Partial': 'Teilweise',
+      'Paid': 'Bezahlt', 'Ordered': 'Bestellt', 'Received': 'Erhalten', 'Overdue': 'Überfällig',
+      'CMR consignment note': 'CMR-Frachtbrief',
+      'Created': 'Erstellt',
+    },
+    fr: {
+      'Dashboard': 'Tableau de bord', 'Documents': 'Documents', 'Customers & suppliers': 'Clients et fournisseurs',
+      'My stock': 'Mon stock', 'Scanned originals': 'Originaux scannés', 'Settings': 'Paramètres',
+      'Log out': 'Se déconnecter', 'Welcome back': 'Bon retour',
+      'Sign in to your company workspace': 'Connectez-vous à l\u2019espace de votre société', 'Sign in': 'Se connecter',
+      'New company? Create one': 'Nouvelle société ? Créez-en une', 'Create a company workspace': 'Créer un espace de société',
+      'One workspace for your whole company': 'Un seul espace pour toute votre société',
+      'Company name': 'Nom de la société', 'Your name': 'Votre nom', 'Email': 'Adresse e-mail', 'Password': 'Mot de passe',
+      'Create workspace': 'Créer l\u2019espace', 'Already have an account? Sign in': 'Vous avez déjà un compte ? Connectez-vous',
+      'Two-step verification': 'Vérification en deux étapes', 'Enter the 6-digit code from your app': 'Saisissez le code à 6 chiffres de votre application',
+      'Verify': 'Vérifier', 'Who owes you': 'Qui vous doit de l\u2019argent', 'You owe suppliers': 'Vous devez aux fournisseurs',
+      'Documents this month': 'Documents ce mois-ci', 'Unpaid documents': 'Documents non payés',
+      'No unpaid documents yet': 'Aucun document impayé pour le moment', 'Number': 'Numéro', 'Customer': 'Client',
+      'Amount': 'Montant', 'Due date': 'Échéance', 'Search documents': 'Rechercher des documents',
+      'All types': 'Tous les types', 'Invoices': 'Factures', 'Quotes': 'Devis', 'Bills (purchases)': 'Factures d\u2019achat',
+      'CMR waybills': 'Lettres de voiture CMR', 'Newest first': 'Plus récents d\u2019abord', 'Oldest first': 'Plus anciens d\u2019abord',
+      'Amount largest → smallest': 'Montant plus grand → plus petit', 'Amount smallest → largest': 'Montant plus petit → plus grand',
+      'Due soonest': 'Échéance la plus proche', 'New invoice': 'Nouvelle facture', 'New quote': 'Nouveau devis',
+      'New bill': 'Nouvelle facture d\u2019achat', 'New CMR': 'Nouveau CMR', 'Status': 'Statut', 'Issue date': 'Date d\u2019émission',
+      'Nothing here yet': 'Rien ici pour le moment', 'New document': 'Nouveau document',
+      'The amount on this document looks unusual — please check': 'Le montant sur ce document semble inhabituel — veuillez vérifier',
+      'check': 'vérifier', 'Description': 'Description', 'Bank account on printout': 'Compte bancaire sur l\u2019impression',
+      'Line items': 'Lignes', 'Item': 'Article', 'Qty': 'Qté', 'Unit price': 'Prix unitaire', 'Sum': 'Total',
+      'Add line': 'Ajouter une ligne', 'Save': 'Enregistrer', 'Print': 'Imprimer', 'Delete': 'Supprimer',
+      'Delete document?': 'Supprimer le document ?', 'Document saved': 'Document enregistré', 'Generate CMR': 'Générer un CMR',
+      'Payments': 'Paiements', 'Quotes are not paid': 'Les devis ne sont pas payés', 'Payment amount': 'Montant du paiement',
+      'Payment date': 'Date du paiement', 'Record payment': 'Enregistrer le paiement', 'Link scan': 'Lier un scan',
+      'Scanning…': 'Numérisation…', 'Scan saved and linked': 'Scan enregistré et lié',
+      'Could not read the file': 'Impossible de lire le fichier', 'Amount found on the scan': 'Montant trouvé sur le scan',
+      'Large amount — please check the document': 'Montant élevé — veuillez vérifier le document',
+      'Not linked': 'Non lié', 'Attach a scanned original (PDF, photo, Excel or CSV)': 'Joignez un original scanné (PDF, photo, Excel ou CSV)',
+      'Search': 'Rechercher', 'Add contact': 'Ajouter un contact', 'Name': 'Nom', 'Kind': 'Type',
+      'VAT no.': 'N° de TVA', 'Phone': 'Téléphone', 'Import': 'Importer', 'Export CSV': 'Exporter en CSV',
+      'Added:': 'Ajoutés :', 'Skipped:': 'Ignorés :', 'Company': 'Société', 'Supplier': 'Fournisseur',
+      'Person': 'Personne', 'Nothing in stock yet': 'Rien en stock pour le moment', 'In stock': 'En stock',
+      'Unit cost (last)': 'Coût unitaire (dernier)', 'Stock value': 'Valeur du stock', 'Item name': 'Nom de l\u2019article',
+      'File': 'Fichier', 'Linked to document': 'Lié au document', 'Actions': 'Actions',
+      'Language': 'Langue', 'Company details': 'Détails de la société', 'Full company name': 'Nom complet de la société',
+      'Registration no.': 'N° d\u2019immatriculation', 'Address': 'Adresse', 'Logo': 'Logo', 'Bank accounts': 'Comptes bancaires',
+      'Bank': 'Banque', 'Add bank': 'Ajouter une banque', 'Backups': 'Sauvegardes',
+      'Set a folder to keep copies of your data': 'Indiquez un dossier pour conserver des copies de vos données',
+      'Backup folder': 'Dossier de sauvegarde', 'Auto-backup daily': 'Sauvegarde quotidienne automatique',
+      'Back up now': 'Sauvegarder maintenant', 'Download backup': 'Télécharger la sauvegarde',
+      'Backup saved': 'Sauvegarde enregistrée',
+      'Restore everything from a backup file': 'Tout restaurer à partir d\u2019un fichier de sauvegarde',
+      'Before a software update: make a backup first, update, and if anything goes wrong, restore here.': 'Avant une mise à jour du logiciel : faites d\u2019abord une sauvegarde, mettez à jour, et si quelque chose se passe mal, restaurez ici.',
+      'Current data is saved as a safety copy first.': 'Les données actuelles sont d\u2019abord enregistrées comme copie de sécurité.',
+      'Choose a backup file': 'Choisissez un fichier de sauvegarde', 'Restore and restart': 'Restaurer et redémarrer',
+      'Restore': 'Restaurer', 'Restoring — the page will reload in a moment': 'Restauration — la page se rechargera dans un instant',
+      'Not a valid Verdins backup': 'Sauvegarde Verdins non valide', 'Enable': 'Activer', 'Disable': 'Désactiver',
+      'Scan this in Microsoft Authenticator, then enter a code to confirm': 'Scannez ceci dans Microsoft Authenticator, puis saisissez un code pour confirmer',
+      'People': 'Personnes', 'Add person': 'Ajouter une personne', 'Load demo data': 'Charger des données de démo',
+      'Demo data loaded': 'Données de démo chargées', 'Owner': 'Propriétaire', 'User': 'Utilisateur',
+      'Adds 10 example documents': 'Ajoute 10 documents d\u2019exemple',
+      'Invoice': 'Facture', 'Quote': 'Devis', 'Bill': 'Facture d\u2019achat', 'CMR': 'CMR',
+      'Issued:': 'Émis le :', 'Due:': 'Échéance :', 'Total': 'Total à payer', 'Pay to:': 'Payer à :',
+      'Sender': 'Expéditeur', 'Carrier': 'Transporteur', 'Consignee': 'Destinataire', 'Place of dispatch': 'Lieu de départ',
+      'Place of delivery': 'Lieu de livraison', 'Goods': 'Marchandises', 'Number of packages': 'Nombre de colis',
+      'Gross weight (kg)': 'Poids brut (kg)', 'Draft': 'Brouillon', 'Sent': 'Envoyé', 'Partial': 'Partiel',
+      'Paid': 'Payé', 'Ordered': 'Commandé', 'Received': 'Reçu', 'Overdue': 'En retard',
+      'CMR consignment note': 'Lettre de voiture CMR',
+      'Created': 'Créé',
+    },
+    it: {
+      'Dashboard': 'Pannello di controllo', 'Documents': 'Documenti', 'Customers & suppliers': 'Clienti e fornitori',
+      'My stock': 'Il mio magazzino', 'Scanned originals': 'Originali scansionati', 'Settings': 'Impostazioni',
+      'Log out': 'Esci', 'Welcome back': 'Bentornato',
+      'Sign in to your company workspace': 'Accedi all\u2019area di lavoro della tua azienda', 'Sign in': 'Accedi',
+      'New company? Create one': 'Nuova azienda? Crea un account', 'Create a company workspace': 'Crea un\u2019area di lavoro aziendale',
+      'One workspace for your whole company': 'Un\u2019unica area di lavoro per tutta la tua azienda',
+      'Company name': 'Nome dell\u2019azienda', 'Your name': 'Il tuo nome', 'Email': 'Un indirizzo e-mail', 'Password': 'Password',
+      'Create workspace': 'Crea area di lavoro', 'Already have an account? Sign in': 'Hai già un account? Accedi',
+      'Two-step verification': 'Verifica in due passaggi', 'Enter the 6-digit code from your app': 'Inserisci il codice a 6 cifre dalla tua app',
+      'Verify': 'Verifica', 'Who owes you': 'Chi ti deve denaro', 'You owe suppliers': 'Devi ai fornitori',
+      'Documents this month': 'Documenti questo mese', 'Unpaid documents': 'Documenti non pagati',
+      'No unpaid documents yet': 'Ancora nessun documento non pagato', 'Number': 'Numero', 'Customer': 'Cliente',
+      'Amount': 'Importo', 'Due date': 'Scadenza', 'Search documents': 'Cerca documenti',
+      'All types': 'Tutti i tipi', 'Invoices': 'Fatture', 'Quotes': 'Preventivi', 'Bills (purchases)': 'Fatture d\u2019acquisto',
+      'CMR waybills': 'Lettere di vettura CMR', 'Newest first': 'Più recenti prima', 'Oldest first': 'Più vecchi prima',
+      'Amount largest → smallest': 'Importo più grande → più piccolo', 'Amount smallest → largest': 'Importo più piccolo → più grande',
+      'Due soonest': 'Scadenza più vicina', 'New invoice': 'Nuova fattura', 'New quote': 'Nuovo preventivo',
+      'New bill': 'Nuova fattura d\u2019acquisto', 'New CMR': 'Nuovo CMR', 'Status': 'Stato', 'Issue date': 'Data di emissione',
+      'Nothing here yet': 'Ancora niente qui', 'New document': 'Nuovo documento',
+      'The amount on this document looks unusual — please check': 'L\u2019importo su questo documento sembra insolito — controlla',
+      'check': 'controllare', 'Description': 'Descrizione', 'Bank account on printout': 'Conto bancario sulla stampa',
+      'Line items': 'Righe', 'Item': 'Articolo', 'Qty': 'Qtà', 'Unit price': 'Prezzo unitario', 'Sum': 'Totale',
+      'Add line': 'Aggiungi riga', 'Save': 'Salva', 'Print': 'Stampa', 'Delete': 'Elimina',
+      'Delete document?': 'Eliminare il documento?', 'Document saved': 'Documento salvato', 'Generate CMR': 'Genera CMR',
+      'Payments': 'Pagamenti', 'Quotes are not paid': 'I preventivi non si pagano', 'Payment amount': 'Importo del pagamento',
+      'Payment date': 'Data del pagamento', 'Record payment': 'Registra pagamento', 'Link scan': 'Collega scansione',
+      'Scanning…': 'Scansione…', 'Scan saved and linked': 'Scansione salvata e collegata',
+      'Could not read the file': 'Impossibile leggere il file', 'Amount found on the scan': 'Importo trovato sulla scansione',
+      'Large amount — please check the document': 'Importo elevato — controlla il documento',
+      'Not linked': 'Non collegato', 'Attach a scanned original (PDF, photo, Excel or CSV)': 'Allega un originale scansionato (PDF, foto, Excel o CSV)',
+      'Search': 'Cerca', 'Add contact': 'Aggiungi contatto', 'Name': 'Nome', 'Kind': 'Tipo',
+      'VAT no.': 'P. IVA', 'Phone': 'Telefono', 'Import': 'Importa', 'Export CSV': 'Esporta CSV',
+      'Added:': 'Aggiunti:', 'Skipped:': 'Saltati:', 'Company': 'Società', 'Supplier': 'Fornitore',
+      'Person': 'Persona', 'Nothing in stock yet': 'Ancora niente in magazzino', 'In stock': 'In magazzino',
+      'Unit cost (last)': 'Costo unitario (ultimo)', 'Stock value': 'Valore del magazzino', 'Item name': 'Nome dell\u2019articolo',
+      'File': 'File', 'Linked to document': 'Collegato al documento', 'Actions': 'Azioni',
+      'Language': 'Lingua', 'Company details': 'Dati dell\u2019azienda', 'Full company name': 'Nome completo dell\u2019azienda',
+      'Registration no.': 'N. di iscrizione', 'Address': 'Indirizzo', 'Logo': 'Logo', 'Bank accounts': 'Conti bancari',
+      'Bank': 'Banca', 'Add bank': 'Aggiungi banca', 'Backups': 'Backup',
+      'Set a folder to keep copies of your data': 'Indica una cartella per conservare le copie dei tuoi dati',
+      'Backup folder': 'Cartella di backup', 'Auto-backup daily': 'Backup automatico giornaliero',
+      'Back up now': 'Esegui backup ora', 'Download backup': 'Scarica backup',
+      'Backup saved': 'Backup salvato',
+      'Restore everything from a backup file': 'Ripristina tutto da un file di backup',
+      'Before a software update: make a backup first, update, and if anything goes wrong, restore here.': 'Prima di un aggiornamento del software: fai prima un backup, aggiorna, e se qualcosa va storto, ripristina qui.',
+      'Current data is saved as a safety copy first.': 'I dati attuali vengono prima salvati come copia di sicurezza.',
+      'Choose a backup file': 'Scegli un file di backup', 'Restore and restart': 'Ripristina e riavvia',
+      'Restore': 'Ripristina', 'Restoring — the page will reload in a moment': 'Ripristino in corso — la pagina si ricaricherà tra un momento',
+      'Not a valid Verdins backup': 'Backup Verdins non valido', 'Enable': 'Attiva', 'Disable': 'Disattiva',
+      'Scan this in Microsoft Authenticator, then enter a code to confirm': 'Scansionalo in Microsoft Authenticator, poi inserisci un codice per confermare',
+      'People': 'Persone', 'Add person': 'Aggiungi persona', 'Load demo data': 'Carica dati dimostrativi',
+      'Demo data loaded': 'Dati dimostrativi caricati', 'Owner': 'Titolare', 'User': 'Utente',
+      'Adds 10 example documents': 'Aggiunge 10 documenti di esempio',
+      'Invoice': 'Fattura', 'Quote': 'Preventivo', 'Bill': 'Fattura d\u2019acquisto', 'CMR': 'CMR',
+      'Issued:': 'Emesso il:', 'Due:': 'Scadenza:', 'Total': 'Totale da pagare', 'Pay to:': 'Paga a:',
+      'Sender': 'Mittente', 'Carrier': 'Vettore', 'Consignee': 'Destinatario', 'Place of dispatch': 'Luogo di partenza',
+      'Place of delivery': 'Luogo di consegna', 'Goods': 'Merce', 'Number of packages': 'Numero di colli',
+      'Gross weight (kg)': 'Peso lordo (kg)', 'Draft': 'Bozza', 'Sent': 'Inviata', 'Partial': 'Parziale',
+      'Paid': 'Pagata', 'Ordered': 'Ordinata', 'Received': 'Ricevuta', 'Overdue': 'Scaduta',
+      'CMR consignment note': 'Lettera di vettura CMR',
+      'Created': 'Creato',
+    },
+    es: {
+      'Dashboard': 'Panel de control', 'Documents': 'Documentos', 'Customers & suppliers': 'Clientes y proveedores',
+      'My stock': 'Mi inventario', 'Scanned originals': 'Originales escaneados', 'Settings': 'Ajustes',
+      'Log out': 'Cerrar sesión', 'Welcome back': 'Bienvenido de nuevo',
+      'Sign in to your company workspace': 'Accede al espacio de trabajo de tu empresa', 'Sign in': 'Entrar',
+      'New company? Create one': '¿Una empresa nueva? Créala', 'Create a company workspace': 'Crear un espacio de trabajo para tu empresa',
+      'One workspace for your whole company': 'Un espacio de trabajo para toda tu empresa',
+      'Company name': 'Nombre de la empresa', 'Your name': 'Tu nombre', 'Email': 'Correo electrónico', 'Password': 'Contraseña',
+      'Create workspace': 'Crear espacio de trabajo', 'Already have an account? Sign in': '¿Ya tienes cuenta? Entra',
+      'Two-step verification': 'Verificación en dos pasos', 'Enter the 6-digit code from your app': 'Introduce el código de 6 dígitos de tu aplicación',
+      'Verify': 'Verificar', 'Who owes you': 'Quién te debe dinero', 'You owe suppliers': 'Debes a los proveedores',
+      'Documents this month': 'Documentos de este mes', 'Unpaid documents': 'Documentos sin pagar',
+      'No unpaid documents yet': 'Todavía no hay documentos sin pagar', 'Number': 'Número', 'Customer': 'Cliente',
+      'Amount': 'Importe', 'Due date': 'Fecha de vencimiento', 'Search documents': 'Buscar documentos',
+      'All types': 'Todos los tipos', 'Invoices': 'Facturas', 'Quotes': 'Presupuestos', 'Bills (purchases)': 'Facturas de compra',
+      'CMR waybills': 'Cartas de porte CMR', 'Newest first': 'Más recientes primero', 'Oldest first': 'Más antiguos primero',
+      'Amount largest → smallest': 'Importe mayor → menor', 'Amount smallest → largest': 'Importe menor → mayor',
+      'Due soonest': 'Vencimiento más próximo', 'New invoice': 'Nueva factura', 'New quote': 'Nuevo presupuesto',
+      'New bill': 'Nueva factura de compra', 'New CMR': 'Nuevo CMR', 'Status': 'Estado', 'Issue date': 'Fecha de emisión',
+      'Nothing here yet': 'Aún no hay nada aquí', 'New document': 'Nuevo documento',
+      'The amount on this document looks unusual — please check': 'El importe de este documento parece inusual — por favor, compruébalo',
+      'check': 'comprobar', 'Description': 'Descripción', 'Bank account on printout': 'Cuenta bancaria en la impresión',
+      'Line items': 'Líneas', 'Item': 'Artículo', 'Qty': 'Cant.', 'Unit price': 'Precio unitario', 'Sum': 'Total',
+      'Add line': 'Añadir línea', 'Save': 'Guardar', 'Print': 'Imprimir', 'Delete': 'Eliminar',
+      'Delete document?': '¿Eliminar el documento?', 'Document saved': 'Documento guardado', 'Generate CMR': 'Generar CMR',
+      'Payments': 'Pagos', 'Quotes are not paid': 'Los presupuestos no se pagan', 'Payment amount': 'Importe del pago',
+      'Payment date': 'Fecha del pago', 'Record payment': 'Registrar pago', 'Link scan': 'Vincular escaneo',
+      'Scanning…': 'Escaneando…', 'Scan saved and linked': 'Escaneo guardado y vinculado',
+      'Could not read the file': 'No se pudo leer el archivo', 'Amount found on the scan': 'Importe encontrado en el escaneo',
+      'Large amount — please check the document': 'Importe elevado — por favor, comprueba el documento',
+      'Not linked': 'No vinculado', 'Attach a scanned original (PDF, photo, Excel or CSV)': 'Adjunta un original escaneado (PDF, foto, Excel o CSV)',
+      'Search': 'Buscar', 'Add contact': 'Añadir contacto', 'Name': 'Nombre', 'Kind': 'Tipo',
+      'VAT no.': 'N.º de IVA', 'Phone': 'Teléfono', 'Import': 'Importar', 'Export CSV': 'Exportar CSV',
+      'Added:': 'Añadidos:', 'Skipped:': 'Omitidos:', 'Company': 'Empresa', 'Supplier': 'Proveedor',
+      'Person': 'Persona', 'Nothing in stock yet': 'Aún no hay nada en el inventario', 'In stock': 'En stock',
+      'Unit cost (last)': 'Coste unitario (último)', 'Stock value': 'Valor del inventario', 'Item name': 'Nombre del artículo',
+      'File': 'Archivo', 'Linked to document': 'Vinculado al documento', 'Actions': 'Acciones',
+      'Language': 'Idioma', 'Company details': 'Datos de la empresa', 'Full company name': 'Nombre completo de la empresa',
+      'Registration no.': 'N.º de registro', 'Address': 'Dirección', 'Logo': 'Logo', 'Bank accounts': 'Cuentas bancarias',
+      'Bank': 'Banco', 'Add bank': 'Añadir banco', 'Backups': 'Copias de seguridad',
+      'Set a folder to keep copies of your data': 'Indica una carpeta para guardar copias de tus datos',
+      'Backup folder': 'Carpeta de copias de seguridad', 'Auto-backup daily': 'Copia de seguridad diaria automática',
+      'Back up now': 'Hacer copia ahora', 'Download backup': 'Descargar copia de seguridad',
+      'Backup saved': 'Copia de seguridad guardada',
+      'Restore everything from a backup file': 'Restaurar todo desde un archivo de copia de seguridad',
+      'Before a software update: make a backup first, update, and if anything goes wrong, restore here.': 'Antes de una actualización del software: haz primero una copia de seguridad, actualiza y, si algo sale mal, restaura aquí.',
+      'Current data is saved as a safety copy first.': 'Los datos actuales se guardan primero como copia de seguridad.',
+      'Choose a backup file': 'Elige un archivo de copia de seguridad', 'Restore and restart': 'Restaurar y reiniciar',
+      'Restore': 'Restaurar', 'Restoring — the page will reload in a moment': 'Restaurando — la página se recargará en un momento',
+      'Not a valid Verdins backup': 'Copia de seguridad de Verdins no válida', 'Enable': 'Activar', 'Disable': 'Desactivar',
+      'Scan this in Microsoft Authenticator, then enter a code to confirm': 'Escanea esto en Microsoft Authenticator y luego introduce un código para confirmar',
+      'People': 'Personas', 'Add person': 'Añadir persona', 'Load demo data': 'Cargar datos de demostración',
+      'Demo data loaded': 'Datos de demostración cargados', 'Owner': 'Propietario', 'User': 'Usuario',
+      'Adds 10 example documents': 'Añade 10 documentos de ejemplo',
+      'Invoice': 'Factura', 'Quote': 'Presupuesto', 'Bill': 'Factura de compra', 'CMR': 'CMR',
+      'Issued:': 'Emitido:', 'Due:': 'Vencimiento:', 'Total': 'Total a pagar', 'Pay to:': 'Pagar a:',
+      'Sender': 'Remitente', 'Carrier': 'Transportista', 'Consignee': 'Destinatario', 'Place of dispatch': 'Lugar de expedición',
+      'Place of delivery': 'Lugar de entrega', 'Goods': 'Mercancías', 'Number of packages': 'Número de bultos',
+      'Gross weight (kg)': 'Peso bruto (kg)', 'Draft': 'Borrador', 'Sent': 'Enviada', 'Partial': 'Parcial',
+      'Paid': 'Pagada', 'Ordered': 'Ordenada', 'Received': 'Recibida', 'Overdue': 'Vencida',
+      'CMR consignment note': 'Carta de porte CMR',
+      'Created': 'Creado',
+    },
+    pl: {
+      'Dashboard': 'Pulpit', 'Documents': 'Dokumenty', 'Customers & suppliers': 'Klienci i dostawcy',
+      'My stock': 'Mój magazyn', 'Scanned originals': 'Zeskanowane oryginały', 'Settings': 'Ustawienia',
+      'Log out': 'Wyloguj się', 'Welcome back': 'Witaj ponownie',
+      'Sign in to your company workspace': 'Zaloguj się do obszaru roboczego swojej firmy', 'Sign in': 'Zaloguj się',
+      'New company? Create one': 'Nowa firma? Załóż ją', 'Create a company workspace': 'Utwórz obszar roboczy firmy',
+      'One workspace for your whole company': 'Jeden obszar roboczy dla całej firmy',
+      'Company name': 'Nazwa firmy', 'Your name': 'Twoje imię', 'Email': 'Adres e-mail', 'Password': 'Hasło',
+      'Create workspace': 'Utwórz obszar roboczy', 'Already have an account? Sign in': 'Masz już konto? Zaloguj się',
+      'Two-step verification': 'Weryfikacja dwuetapowa', 'Enter the 6-digit code from your app': 'Wpisz 6-cyfrowy kod ze swojej aplikacji',
+      'Verify': 'Zweryfikuj', 'Who owes you': 'Kto jest Ci winien', 'You owe suppliers': 'Winien jesteś dostawcom',
+      'Documents this month': 'Dokumenty w tym miesiącu', 'Unpaid documents': 'Nieopłacone dokumenty',
+      'No unpaid documents yet': 'Nie ma jeszcze nieopłaconych dokumentów', 'Number': 'Numer', 'Customer': 'Klient',
+      'Amount': 'Kwota', 'Due date': 'Termin płatności', 'Search documents': 'Szukaj dokumentów',
+      'All types': 'Wszystkie typy', 'Invoices': 'Faktury', 'Quotes': 'Oferty', 'Bills (purchases)': 'Faktury zakupu',
+      'CMR waybills': 'Listy przewozowe CMR', 'Newest first': 'Najnowsze najpierw', 'Oldest first': 'Najstarsze najpierw',
+      'Amount largest → smallest': 'Kwota największa → najmniejsza', 'Amount smallest → largest': 'Kwota najmniejsza → największa',
+      'Due soonest': 'Najbliższy termin', 'New invoice': 'Nowa faktura', 'New quote': 'Nowa oferta',
+      'New bill': 'Nowa faktura zakupu', 'New CMR': 'Nowy CMR', 'Status': 'Status', 'Issue date': 'Data wystawienia',
+      'Nothing here yet': 'Nie ma tu jeszcze niczego', 'New document': 'Nowy dokument',
+      'The amount on this document looks unusual — please check': 'Kwota na tym dokumencie wygląda nietypowo — proszę sprawdzić',
+      'check': 'sprawdzić', 'Description': 'Opis', 'Bank account on printout': 'Konto bankowe na wydruku',
+      'Line items': 'Pozycje', 'Item': 'Towar', 'Qty': 'Ilość', 'Unit price': 'Cena jednostkowa', 'Sum': 'Suma',
+      'Add line': 'Dodaj pozycję', 'Save': 'Zapisz', 'Print': 'Drukuj', 'Delete': 'Usuń',
+      'Delete document?': 'Usunąć dokument?', 'Document saved': 'Dokument zapisany', 'Generate CMR': 'Wygeneruj CMR',
+      'Payments': 'Płatności', 'Quotes are not paid': 'Oferty nie są opłacane', 'Payment amount': 'Kwota płatności',
+      'Payment date': 'Data płatności', 'Record payment': 'Zarejestruj płatność', 'Link scan': 'Powiąż skan',
+      'Scanning…': 'Skanowanie…', 'Scan saved and linked': 'Skan zapisany i powiązany',
+      'Could not read the file': 'Nie udało się odczytać pliku', 'Amount found on the scan': 'Kwota znaleziona na skanie',
+      'Large amount — please check the document': 'Duża kwota — proszę sprawdzić dokument',
+      'Not linked': 'Niepowiązany', 'Attach a scanned original (PDF, photo, Excel or CSV)': 'Dołącz zeskanowany oryginał (PDF, zdjęcie, Excel lub CSV)',
+      'Search': 'Szukaj', 'Add contact': 'Dodaj kontakt', 'Name': 'Nazwa', 'Kind': 'Rodzaj',
+      'VAT no.': 'Nr VAT', 'Phone': 'Telefon', 'Import': 'Importuj', 'Export CSV': 'Eksportuj CSV',
+      'Added:': 'Dodano:', 'Skipped:': 'Pominięto:', 'Company': 'Firma', 'Supplier': 'Dostawca',
+      'Person': 'Osoba', 'Nothing in stock yet': 'Nie ma jeszcze niczego w magazynie', 'In stock': 'Na stanie',
+      'Unit cost (last)': 'Koszt jednostkowy (ostatni)', 'Stock value': 'Wartość magazynu', 'Item name': 'Nazwa towaru',
+      'File': 'Plik', 'Linked to document': 'Powiązany z dokumentem', 'Actions': 'Działania',
+      'Language': 'Język', 'Company details': 'Dane firmy', 'Full company name': 'Pełna nazwa firmy',
+      'Registration no.': 'Nr rejestracyjny', 'Address': 'Adres', 'Logo': 'Logo', 'Bank accounts': 'Konta bankowe',
+      'Bank': 'Bank', 'Add bank': 'Dodaj bank', 'Backups': 'Kopie zapasowe',
+      'Set a folder to keep copies of your data': 'Wskaż folder do przechowywania kopii danych',
+      'Backup folder': 'Folder kopii zapasowych', 'Auto-backup daily': 'Codzienna kopia zapasowa',
+      'Back up now': 'Zrób kopię teraz', 'Download backup': 'Pobierz kopię zapasową',
+      'Backup saved': 'Kopia zapasowa zapisana',
+      'Restore everything from a backup file': 'Przywróć wszystko z pliku kopii zapasowej',
+      'Before a software update: make a backup first, update, and if anything goes wrong, restore here.': 'Przed aktualizacją oprogramowania: najpierw zrób kopię zapasową, zaktualizuj, a jeśli coś pójdzie nie tak, przywróć tutaj.',
+      'Current data is saved as a safety copy first.': 'Bieżące dane są najpierw zapisywane jako kopia bezpieczeństwa.',
+      'Choose a backup file': 'Wybierz plik kopii zapasowej', 'Restore and restart': 'Przywróć i uruchom ponownie',
+      'Restore': 'Przywróć', 'Restoring — the page will reload in a moment': 'Przywracanie — strona za chwilę się odświeży',
+      'Not a valid Verdins backup': 'To nie jest prawidłowa kopia zapasowa Verdins', 'Enable': 'Włącz', 'Disable': 'Wyłącz',
+      'Scan this in Microsoft Authenticator, then enter a code to confirm': 'Zeskanuj to w Microsoft Authenticator, a następnie wpisz kod, aby potwierdzić',
+      'People': 'Osoby', 'Add person': 'Dodaj osobę', 'Load demo data': 'Wczytaj dane demonstracyjne',
+      'Demo data loaded': 'Dane demonstracyjne wczytane', 'Owner': 'Właściciel', 'User': 'Użytkownik',
+      'Adds 10 example documents': 'Dodaje 10 przykładowych dokumentów',
+      'Invoice': 'Faktura', 'Quote': 'Oferta', 'Bill': 'Faktura zakupu', 'CMR': 'CMR',
+      'Issued:': 'Wystawiono:', 'Due:': 'Termin:', 'Total': 'Do zapłaty', 'Pay to:': 'Zapłać na:',
+      'Sender': 'Nadawca', 'Carrier': 'Przewoźnik', 'Consignee': 'Odbiorca', 'Place of dispatch': 'Miejsce nadania',
+      'Place of delivery': 'Miejsce dostawy', 'Goods': 'Towar', 'Number of packages': 'Liczba opakowań',
+      'Gross weight (kg)': 'Masa brutto (kg)', 'Draft': 'Szkic', 'Sent': 'Wysłana', 'Partial': 'Częściowo',
+      'Paid': 'Opłacona', 'Ordered': 'Zamówiona', 'Received': 'Otrzymana', 'Overdue': 'Zaległa',
+      'CMR consignment note': 'List przewozowy CMR',
+      'Created': 'Utworzono',
     },
   };
 
-  // dynamic patterns (numbers inside), applied after exact phrases
-  const PATTERNS = {
-    lv: [
-      [/VAT (\d+(?:[.,]\d+)?)%/, 'PVN $1%'],
-      [/VAT (\d+(?:[.,]\d+)?)%/, 'PVN $1%'], // (kept twice: totals row + header contexts)
-    ],
-  };
+  var VAT_WORD = { lv: 'PVN', de: 'MwSt.', fr: 'TVA', it: 'IVA', es: 'IVA', pl: 'VAT' };
 
-  const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const caches = {};
-  function rules(lang) {
-    if (lang === 'en' || !DICT[lang]) return [];
-    if (!caches[lang]) {
-      caches[lang] = Object.entries(DICT[lang])
-        .sort((a, b) => b[0].length - a[0].length)
-        .map(([en, tr]) => [new RegExp(`(^|[^A-Za-z0-9])${escapeRe(en)}($|[^A-Za-z0-9])`, 'g'), (m, a, b) => a + tr + b]);
+  var lang = 'en';
+  try {
+    var saved = localStorage.getItem('verdins-lang');
+    if (saved && LANGS[saved]) lang = saved;
+    else {
+      var nav = (navigator.language || 'en').slice(0, 2);
+      if (LANGS[nav]) lang = nav;
     }
-    return caches[lang];
-  }
+  } catch (e) {}
 
-  function translateHtml(html) {
-    const lang = getLang();
-    if (lang === 'en') return html;
-    const phrasePass = (text) => {
-      let out = text;
-      for (const [re, rep] of rules(lang)) out = out.replace(re, rep);
-      for (const [re, rep] of (PATTERNS[lang] || [])) out = out.replace(re, rep);
-      return out;
-    };
-    // translate only text between tags — never inside <...> (class names, ids, data stay intact)
-    return String(html).split(/(<[^>]*>)/).map((seg) =>
-      seg.startsWith('<') ? seg : phrasePass(seg)
-    ).join('');
-  }
   function translateText(s) {
-    const lang = getLang();
-    if (lang === 'en' || !DICT[lang] || !s) return s;
-    const t = DICT[lang][String(s)];
-    return t || s;
+    if (lang === 'en' || typeof s !== 'string') return s;
+    var d = DICT[lang];
+    var out = d && Object.prototype.hasOwnProperty.call(d, s) ? d[s] : s;
+    if (out === s && VAT_WORD[lang]) out = out.replace(/\bVAT\b/g, VAT_WORD[lang]);
+    return out;
   }
 
-  // auto-translate everything the app renders via innerHTML / textContent
-  const htmlDesc = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
-  Object.defineProperty(Element.prototype, 'innerHTML', {
-    get: htmlDesc.get,
-    set(v) { htmlDesc.set.call(this, translateHtml(String(v))); },
-    configurable: true,
-  });
-  const textDesc = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent');
-  Object.defineProperty(Node.prototype, 'textContent', {
-    get: textDesc.get,
-    set(v) { textDesc.set.call(this, translateText(v)); },
-    configurable: true,
-  });
+  // translate only text BETWEEN tags: tags and attributes stay untouched
+  function translateHtml(html) {
+    if (lang === 'en' || typeof html !== 'string') return html;
+    return html.split(/(<[^>]*>)/).map(function (part) {
+      return part.charAt(0) === '<' ? part : translateText(part);
+    }).join('');
+  }
 
-  window.REDA_I18N = { getLang, setLang, translateHtml, translateText, LANGS };
-  document.documentElement.lang = getLang();
+  function setLang(l) {
+    if (!LANGS[l]) return;
+    lang = l;
+    try { localStorage.setItem('verdins-lang', l); } catch (e) {}
+    try {
+      document.documentElement.setAttribute('lang', l);
+      var t = document.title;
+      document.title = translateText(t) === t ? t : t;
+      // re-render happens through the app's own setLang listener
+    } catch (e) {}
+    if (window.dispatchEvent) window.dispatchEvent(new Event('verdins-lang'));
+  }
+
+  // patch prototypes so any innerHTML/textContent the app sets gets translated
+  if (proto && rawSetIH) {
+    try {
+      Object.defineProperty(proto, 'innerHTML', {
+        configurable: true,
+        get: function () { return rawGetIH.call(this); },
+        set: function (v) { rawSetIH.call(this, translateHtml(String(v))); },
+      });
+    } catch (e) {}
+  }
+  if (nproto && rawSetTC) {
+    try {
+      Object.defineProperty(nproto, 'textContent', {
+        configurable: true,
+        get: function () { return rawGetTC.call(this); },
+        set: function (v) { rawSetTC.call(this, translateText(String(v))); },
+      });
+    } catch (e) {}
+  }
+
+  window.VERDINS_I18N = {
+    LANGS: LANGS,
+    DICT: DICT,
+    getLang: function () { return lang; },
+    setLang: setLang,
+    translateText: translateText,
+    translateHtml: translateHtml,
+  };
 })();
